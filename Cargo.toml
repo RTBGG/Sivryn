@@ -57,6 +57,7 @@ base64 = "0.23"
 # client
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 
 # media
 livekit = { version = "0.9", features = ["rustls-tls-webpki-roots"] }
@@ -67,9 +68,15 @@ openmls_rust_crypto = "0.6"
 openmls_basic_credential = "0.6"
 
 # ui
-dioxus-native = { version = "0.7", features = ["prelude"] }
+dioxus-native = { version = "0.7", features = ["prelude", "autofocus"] }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Patched copies of the Blitz renderer used by Dioxus Native 0.7: caret in text
+# colour, masked password inputs and fonts in text inputs. See vendor/SIVRYN-PATCHES.md.
+[patch.crates-io]
+blitz-paint = { path = "vendor/blitz-paint" }
+blitz-dom = { path = "vendor/blitz-dom" }

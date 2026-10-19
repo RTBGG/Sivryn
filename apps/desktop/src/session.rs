@@ -33,13 +33,19 @@ impl Session {
     ///
     /// TODO: persist the device and its MLS state, and store the session token
     /// in the OS keychain, instead of creating a new device on every start.
-    pub async fn start(instance: &str, username: &str, password: &str, register: bool) -> Result<Self, String> {
+    pub async fn start(
+        instance: &str,
+        username: &str,
+        password: &str,
+        register: bool,
+        invite_code: Option<&str>,
+    ) -> Result<Self, String> {
         let mut api = ApiClient::new(instance).map_err(|e| e.to_string())?;
         let user = if register {
             let req = sivryn_client_core::protocol::api::RegisterRequest {
                 username: username.into(),
                 password: password.into(),
-                invite_code: None,
+                invite_code: invite_code.map(str::to_owned),
             };
             api.register(&req).await
         } else {

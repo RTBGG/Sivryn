@@ -19,6 +19,8 @@ fn main() {
                 .unwrap_or_else(|_| "warn,sivryn_desktop=debug,sivryn_media=debug,sivryn_client_core=debug".into()),
         )
         .init();
+    install_crash_log();
+    sivryn_client_core::install_crypto_provider();
 
     let window = WindowAttributes::default()
         .with_title("Sivryn")
@@ -28,4 +30,29 @@ fn main() {
     // dioxus-native runs a tokio runtime on the UI thread, so network futures
     // can be awaited directly from components.
     dioxus_native::launch_cfg(ui::App, Vec::new(), vec![Box::new(window)]);
+}
+
+/// Release builds have no console, so panics would vanish without a trace.
+/// Append them to `%LOCALAPPDATA%\Sivryn\crash.log` (or the temp dir).
+fn install_crash_log() {
+    let dir = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("Sivryn").join("crash.log");
+    let default_hook = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let report = format!(
+            "--- sivryn-desktop {} crashed (unix time {secs})\n{info}\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture(),
+        );
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(report.as_bytes());
+        }
+        default_hook(info);
+    }));
 }

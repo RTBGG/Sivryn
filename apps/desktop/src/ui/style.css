@@ -2,11 +2,14 @@
 
 body {
   margin: 0;
-  font-family: system-ui, sans-serif;
-  font-size: 14px;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
   color: #e6e6eb;
   background: #15161a;
 }
+
+/* Form controls don't inherit fonts by default. */
+input, button { font-family: "Segoe UI", system-ui, sans-serif; font-size: 15px; }
 
 button {
   background: #2a2c33;
@@ -27,6 +30,10 @@ input {
   border-radius: 6px;
   padding: 9px 10px;
 }
+
+.password-field { display: flex; align-items: center; background: #0f1013; border: 1px solid #2f3138; border-radius: 6px; }
+.password-field input { flex-grow: 1; width: 0; min-width: 0; border: none; background: transparent; }
+.password-field .eye { display: flex; align-items: center; padding: 6px 10px; background: transparent; }
 
 .muted { color: #8b8d98; }
 .error { color: #ff7a8a; }

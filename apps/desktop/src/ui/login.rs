@@ -9,11 +9,12 @@ pub fn Login() -> Element {
     let mut state = use_context::<AppState>();
     let mut instance = use_signal(|| "https://".to_string());
     let mut username = use_signal(String::new);
-    let mut password = use_signal(String::new);
+    let password = use_signal(String::new);
+    let mut invite_code = use_signal(String::new);
     let mut register = use_signal(|| false);
     let mut busy = use_signal(|| false);
 
-    let submit = move |_| {
+    let mut submit = move || {
         if *busy.read() {
             return;
         }
@@ -22,7 +23,9 @@ pub fn Login() -> Element {
         spawn(async move {
             // Clone out of the signals: their read guards must not live across `.await`.
             let (instance, username, password) = (instance.cloned(), username.cloned(), password.cloned());
-            let result = Session::start(&instance, &username, &password, *register.peek()).await;
+            let code = invite_code.cloned();
+            let code = Some(code.trim()).filter(|c| !c.is_empty());
+            let result = Session::start(&instance, &username, &password, *register.peek(), code).await;
             busy.set(false);
             match result {
                 Ok(session) => {
@@ -35,9 +38,10 @@ pub fn Login() -> Element {
         });
     };
 
-    let title = if *register.read() { "Create an account" } else { "Welcome back" };
-    let action = if *register.read() { "Register" } else { "Log in" };
-    let toggle = if *register.read() { "Already have an account? Log in" } else { "New here? Register" };
+    let registering = *register.read();
+    let title = if registering { "Create an account" } else { "Welcome back" };
+    let action = if registering { "Register" } else { "Log in" };
+    let toggle = if registering { "Already have an account? Log in" } else { "New here? Register" };
 
     rsx! {
         div { class: "login",
@@ -46,6 +50,7 @@ pub fn Login() -> Element {
                 p { class: "muted", "{title}" }
                 label { "Instance" }
                 input {
+                    autofocus: "true",
                     value: "{instance}",
                     oninput: move |e| instance.set(e.value()),
                 }
@@ -55,18 +60,75 @@ pub fn Login() -> Element {
                     oninput: move |e| username.set(e.value()),
                 }
                 label { "Password" }
-                input {
-                    r#type: "password",
-                    value: "{password}",
-                    oninput: move |e| password.set(e.value()),
+                PasswordInput {
+                    value: password,
+                    on_enter: move |_| submit(),
+                }
+                if registering {
+                    label { "Invite code" }
+                    input {
+                        value: "{invite_code}",
+                        placeholder: "Only needed if the instance is invite-only",
+                        oninput: move |e| invite_code.set(e.value()),
+                    }
                 }
                 if let Some(err) = state.status.read().as_ref() {
                     p { class: "error", "{err}" }
                 }
-                button { class: "primary", onclick: submit,
+                button { class: "primary", onclick: move |_| submit(),
                     if *busy.read() { "…" } else { "{action}" }
                 }
                 p { class: "link", onclick: move |_| register.toggle(), "{toggle}" }
+            }
+        }
+    }
+}
+
+/// Masked password field with an eye button to reveal the text.
+#[component]
+fn PasswordInput(value: Signal<String>, on_enter: EventHandler<()>) -> Element {
+    let mut value = value;
+    let mut visible = use_signal(|| false);
+    let shown = *visible.read();
+
+    rsx! {
+        div { class: "password-field",
+            input {
+                r#type: if shown { "text" } else { "password" },
+                value: "{value}",
+                oninput: move |e| value.set(e.value()),
+                onkeydown: move |e| {
+                    if e.key() == Key::Enter {
+                        on_enter.call(());
+                    }
+                },
+            }
+            button {
+                class: "eye",
+                title: if shown { "Hide password" } else { "Show password" },
+                onclick: move |_| visible.toggle(),
+                EyeIcon { crossed: shown }
+            }
+        }
+    }
+}
+
+#[component]
+fn EyeIcon(crossed: bool) -> Element {
+    rsx! {
+        svg {
+            width: "18",
+            height: "18",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "#8b8d98",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" }
+            circle { cx: "12", cy: "12", r: "3" }
+            if crossed {
+                line { x1: "3", y1: "3", x2: "21", y2: "21" }
             }
         }
     }

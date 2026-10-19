@@ -14,9 +14,21 @@ pub struct GatewayConnection {
     pub events: mpsc::Receiver<ServerMessage>,
 }
 
+/// rustls needs a process-wide crypto provider for `wss://` (gateway and
+/// LiveKit). Clients pull in both `ring` and `aws-lc-rs` through their
+/// dependencies, and with two candidates rustls refuses to pick one and
+/// panics. Call this at startup; an already installed provider is kept.
+pub fn install_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Connects, identifies and keeps the connection alive with heartbeats in a
 /// background task. Reconnecting after a drop is up to the caller.
 pub async fn connect_gateway(api: &ApiClient, device_id: Option<DeviceId>) -> Result<GatewayConnection, ClientError> {
+    install_crypto_provider();
     let token = api.token().ok_or(ClientError::NotLoggedIn)?.to_owned();
     let (socket, _) = tokio_tungstenite::connect_async(api.gateway_url())
         .await

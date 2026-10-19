@@ -822,8 +822,6 @@ dependencies = [
 [[package]]
 name = "blitz-dom"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c81d0f520bad6798a54cc4360bcabd245dc0aba2ce5917217d1d82ac5ee6bfed"
 dependencies = [
  "accesskit",
  "app_units",
@@ -886,8 +884,6 @@ dependencies = [
 [[package]]
 name = "blitz-paint"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "027aa42b3795589c9d7ae0238ac3087f9f22b58f9643fc22c4dc1ef1ef3413b2"
 dependencies = [
  "anyrender",
  "anyrender_svg",
@@ -7437,6 +7433,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "reqwest 0.13.5",
+ "rustls",
  "serde",
  "serde_json",
  "sivryn-protocol",
@@ -7466,6 +7463,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus-native",
  "futures",
+ "rustls",
  "sivryn-client-core",
  "sivryn-crypto",
  "sivryn-media",
