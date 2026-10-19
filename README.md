@@ -31,8 +31,8 @@ Requirements: a Linux server with Docker, a domain pointing to it, and ports
 `80/tcp`, `443/tcp+udp`, `7881/tcp` and `7882/udp` open.
 
 ```sh
-git clone https://github.com/sivryn/sivryn.git
-cd sivryn/deploy
+git clone https://github.com/RTBGG/Sivryn.git
+cd Sivryn/deploy
 ./setup.sh            # asks for your domain, generates .env with random secrets
 docker compose up -d
 ```

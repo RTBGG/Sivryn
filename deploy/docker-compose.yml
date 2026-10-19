@@ -10,7 +10,7 @@ name: sivryn
 
 services:
   sivryn:
-    image: ghcr.io/sivryn/sivryn-server:${SIVRYN_VERSION:-latest}
+    image: ghcr.io/rtbgg/sivryn-server:${SIVRYN_VERSION:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
