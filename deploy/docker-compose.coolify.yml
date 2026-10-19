@@ -14,7 +14,9 @@
 services:
   sivryn:
     build:
-      context: ..
+      # Coolify runs compose with --project-directory set to the base directory
+      # (the repository root), and relative paths resolve against that.
+      context: .
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     # Coolify uses the first exposed port as the domain's default internal port.
