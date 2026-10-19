@@ -1,5 +1,9 @@
 //! Sivryn desktop client (Dioxus Native: GPU-rendered UI without a webview).
 
+// Release builds are GUI apps without a console window; debug builds keep the
+// console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod chat;
 mod session;
 mod ui;
