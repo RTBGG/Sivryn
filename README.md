@@ -45,6 +45,21 @@ If you already run a reverse proxy, remove `caddy` from `COMPOSE_PROFILES` and p
 `/rtc*` and `/twirp*` to `127.0.0.1:7880` (LiveKit) and everything else to
 `127.0.0.1:8080` (Sivryn).
 
+### Coolify
+
+Use [`deploy/docker-compose.coolify.yml`](deploy/docker-compose.coolify.yml). It leaves HTTPS
+to Coolify's proxy, lets Coolify generate all secrets and needs no repository files at runtime.
+
+1. **New Resource → Public Repository** with `https://github.com/RTBGG/Sivryn`, build pack
+   **Docker Compose**, compose file `/deploy/docker-compose.coolify.yml`.
+2. Assign two domains: `sivryn` → `https://chat.example.com` (port 8080) and
+   `livekit` → `https://livekit.example.com` (port 7880). LiveKit needs its own subdomain.
+3. Open `7881/tcp` and `7882/udp` in your firewall. WebRTC media goes directly to LiveKit,
+   not through the proxy.
+4. Deploy, then register in the desktop app with `https://chat.example.com`.
+
+Registration mode and screen share limits are listed under the resource's environment variables.
+
 ### Screen share quality
 
 Every limit is configurable per instance in `deploy/.env`:

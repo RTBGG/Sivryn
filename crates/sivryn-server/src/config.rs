@@ -75,7 +75,7 @@ impl Config {
             registration,
             session_ttl_days: parse_or("SIVRYN_SESSION_TTL_DAYS", 30)?,
             livekit: LiveKitConfig {
-                public_url: required("SIVRYN_LIVEKIT_URL")?,
+                public_url: websocket_url(&required("SIVRYN_LIVEKIT_URL")?)?,
                 api_key: required("LIVEKIT_API_KEY")?,
                 api_secret: required("LIVEKIT_API_SECRET")?,
             },
@@ -105,6 +105,22 @@ where
     }
 }
 
+/// LiveKit clients connect over WebSocket. Platforms like Coolify hand out
+/// `https://` URLs, so those are converted to `wss://` (and `http://` to `ws://`).
+fn websocket_url(url: &str) -> anyhow::Result<String> {
+    let url = url.trim().trim_end_matches('/');
+    let converted = if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if url.starts_with("wss://") || url.starts_with("ws://") {
+        url.to_owned()
+    } else {
+        bail!("SIVRYN_LIVEKIT_URL must start with wss://, ws://, https:// or http://, got {url:?}");
+    };
+    Ok(converted)
+}
+
 fn parse_codecs(list: &str) -> anyhow::Result<Vec<VideoCodec>> {
     list.split(',')
         .map(|c| match c.trim().to_ascii_lowercase().as_str() {
@@ -120,6 +136,14 @@ fn parse_codecs(list: &str) -> anyhow::Result<Vec<VideoCodec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn livekit_url_is_converted_to_websocket() {
+        assert_eq!(websocket_url("https://livekit.example.com/").unwrap(), "wss://livekit.example.com");
+        assert_eq!(websocket_url("http://localhost:7880").unwrap(), "ws://localhost:7880");
+        assert_eq!(websocket_url("wss://chat.example.com").unwrap(), "wss://chat.example.com");
+        assert!(websocket_url("livekit.example.com").is_err());
+    }
 
     #[test]
     fn parses_codec_list() {

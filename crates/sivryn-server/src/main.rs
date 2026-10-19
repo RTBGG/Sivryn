@@ -6,8 +6,17 @@ use sivryn_server::config::Config;
 use sivryn_server::{AppState, connect_db, event_bus, router};
 use tracing_subscriber::EnvFilter;
 
+fn main() -> anyhow::Result<()> {
+    // The image is distroless (no shell, no curl), so container health checks
+    // call the binary itself: `sivryn-server healthcheck`.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck();
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sivryn_server=debug".into()))
         .init();
@@ -23,6 +32,25 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%bind, "sivryn-server listening");
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
     Ok(())
+}
+
+/// Exits successfully if the local server answers `GET /healthz` with 200.
+fn healthcheck() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let bind: SocketAddr = std::env::var("SIVRYN_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()).parse()?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], bind.port()));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.write_all(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    match response.lines().next() {
+        Some(status) if status.split_whitespace().nth(1) == Some("200") => Ok(()),
+        status => anyhow::bail!("unhealthy: {status:?}"),
+    }
 }
 
 async fn shutdown_signal() {
