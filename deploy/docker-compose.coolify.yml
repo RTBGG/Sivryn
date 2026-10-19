@@ -17,6 +17,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    # Coolify uses the first exposed port as the domain's default internal port.
+    expose:
+      - "8080"
     environment:
       # Coolify routes the domain assigned to this service to port 8080.
       - SERVICE_URL_SIVRYN_8080
@@ -62,6 +65,9 @@ services:
   livekit:
     image: livekit/livekit-server:v1.13
     restart: unless-stopped
+    # Default internal port for the domain; otherwise Coolify picks 7881 from `ports`.
+    expose:
+      - "7880"
     environment:
       # Coolify routes the domain assigned to this service to port 7880.
       - SERVICE_URL_LIVEKIT_7880
