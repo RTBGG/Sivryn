@@ -102,6 +102,26 @@ static CRT that libwebrtc requires.
 
 Design decisions and their trade-offs are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+### Releases
+
+Pushing a version tag runs [`release.yml`](.github/workflows/release.yml):
+
+```sh
+git tag -a v0.1.0-alpha.2 -m "Sivryn v0.1.0-alpha.2"
+git push origin v0.1.0-alpha.2
+```
+
+It attaches `sivryn-desktop-<tag>-windows-x64.exe` and `SHA256SUMS.txt` to the GitHub release
+and pushes the server image to `ghcr.io/rtbgg/sivryn-server:<version>`. Tags with a suffix such
+as `-alpha.2` become pre-releases and don't update the image's `latest` tag. If you want custom
+release notes, create the release on GitHub before pushing the tag; the workflow then only adds
+the files. Otherwise it generates notes from the commits.
+
+The GHCR package is private after its first push. Make it public once under
+*Package settings → Change visibility* so servers can pull it without logging in. Until there is
+a non-pre-release, set `SIVRYN_VERSION` (e.g. `0.1.0-alpha.2`) in `deploy/.env` or let compose
+build the image itself.
+
 ## Roadmap
 
 - [x] Server: accounts, sessions, guilds, channels, roles, invites, gateway
