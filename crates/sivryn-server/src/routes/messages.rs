@@ -25,17 +25,32 @@ pub async fn list(
     db::require_channel(&state.db, channel_id, auth.id, Permissions::VIEW_CHANNEL).await?;
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as i64;
 
-    // UUIDv7 sorts by time, so `id < before` pages backwards through history.
-    let rows: Vec<MessageRow> = sqlx::query_as(
-        "SELECT * FROM messages
-         WHERE channel_id = $1 AND ($2::UUID IS NULL OR id < $2)
-         ORDER BY id DESC LIMIT $3",
-    )
-    .bind(channel_id.0)
-    .bind(q.before.map(|id| id.0))
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await?;
+    // UUIDv7 sorts by time: `id < before` pages backwards through history,
+    // `id > after` walks forwards from the last message a client has seen.
+    let rows: Vec<MessageRow> = if let Some(after) = q.after {
+        sqlx::query_as(
+            "SELECT * FROM messages
+             WHERE channel_id = $1 AND id > $2 AND ($3::UUID IS NULL OR id < $3)
+             ORDER BY id ASC LIMIT $4",
+        )
+        .bind(channel_id.0)
+        .bind(after.0)
+        .bind(q.before.map(|id| id.0))
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT * FROM messages
+             WHERE channel_id = $1 AND ($2::UUID IS NULL OR id < $2)
+             ORDER BY id DESC LIMIT $3",
+        )
+        .bind(channel_id.0)
+        .bind(q.before.map(|id| id.0))
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     Ok(Json(MessagePage { messages: rows.into_iter().map(Into::into).collect() }))
 }

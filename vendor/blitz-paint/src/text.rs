@@ -12,12 +12,15 @@ pub(crate) fn stroke_text<'a>(
     doc: &BaseDocument,
     pos: Point,
 ) {
-    let transform = Affine::translate((pos.x * scale, pos.y * scale));
+    // Sivryn patch: snap baselines to whole device pixels. Glyph hinting
+    // aligns outlines vertically to the pixel grid, which only sharpens text
+    // when the baseline itself sits on a pixel boundary.
+    let transform = Affine::translate((pos.x * scale, (pos.y * scale).round()));
     for line in lines {
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
                 let mut x = glyph_run.offset();
-                let y = glyph_run.baseline();
+                let y = glyph_run.baseline().round();
 
                 let run = glyph_run.run();
                 let font = run.font();

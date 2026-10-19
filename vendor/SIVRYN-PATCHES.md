@@ -1,4 +1,4 @@
-# Patched Blitz crates
+# Patched crates
 
 Dioxus Native 0.7 renders with Blitz 0.2. Two of its crates are vendored here with small
 patches and wired in through `[patch.crates-io]` in the workspace `Cargo.toml`. Both are
@@ -12,10 +12,25 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/render.rs`: `<input type="password">` is painted as evenly spaced dots, with caret
   and selection drawn at the dot positions (`draw_password_input`). Upstream has no
   password masking yet. Mouse hit-testing still uses the real glyph positions.
+- `src/text.rs`: text baselines are snapped to whole device pixels so hinted glyphs land on
+  the pixel grid; fractional baselines made text look blurry at 100 % display scaling.
 
 ## blitz-dom 0.2.4
 
 - `src/layout/construct.rs`: text inputs honour `font-family` and `font-weight`; before,
   they always used the default font.
 
-Drop a patch once Sivryn moves to a Blitz release that covers it.
+## sonora-agc2 0.2.0 and sonora-common-audio 0.2.0
+
+Part of https://github.com/dignifiedquire/sonora (BSD-3-Clause), the Rust port of WebRTC's
+audio processing used for echo cancellation and automatic gain.
+
+- `sonora-agc2/src/vad_wrapper.rs`, `sonora-common-audio/src/channel_buffer.rs`,
+  `sonora-common-audio/src/sinc_resampler.rs` and both `Cargo.toml`: hand-written `Debug` impls replace
+  `derive_more::Debug`. Cargo unifies features, so `derive_more/debug` would also be
+  enabled for stylo (Blitz's CSS engine), whose `#[macro_use] extern crate derive_more`
+  then shadows the standard `Debug` derive and fails to compile.
+
+The 11 MB of test audio in `sonora-agc2/tests/` is left out; the crate's own tests aren't run here.
+
+Drop a patch once Sivryn moves to a release that covers it.

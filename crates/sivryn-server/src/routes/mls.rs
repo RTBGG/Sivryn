@@ -9,8 +9,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use sivryn_protocol::api::{
-    ClaimedKeyPackage, MlsCommitRequest, MlsWelcome, PendingWelcome, RegisterDeviceRequest, RegisterDeviceResponse,
-    StoredCommit,
+    ClaimedKeyPackage, KeyPackageCount, MlsCommitRequest, MlsWelcome, PendingWelcome, RegisterDeviceRequest,
+    RegisterDeviceResponse, StoredCommit,
 };
 use sivryn_protocol::gateway::Event;
 use sivryn_protocol::permissions::Permissions;
@@ -45,6 +45,19 @@ pub async fn register_device(
 #[derive(Deserialize)]
 pub struct KeyPackageUpload {
     pub key_packages: Vec<String>,
+}
+
+pub async fn count_key_packages(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(device_id): Path<DeviceId>,
+) -> ApiResult<Json<KeyPackageCount>> {
+    db::require_own_device(&state.db, device_id, auth.id).await?;
+    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM key_packages WHERE device_id = $1")
+        .bind(device_id.0)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(KeyPackageCount { count: count as u32 }))
 }
 
 pub async fn upload_key_packages(

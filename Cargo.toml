@@ -80,3 +80,5 @@ strip = true
 [patch.crates-io]
 blitz-paint = { path = "vendor/blitz-paint" }
 blitz-dom = { path = "vendor/blitz-dom" }
+sonora-agc2 = { path = "vendor/sonora-agc2" }
+sonora-common-audio = { path = "vendor/sonora-common-audio" }

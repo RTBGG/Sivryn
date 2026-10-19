@@ -1,15 +1,15 @@
-use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
 
 use super::AppState;
+use super::icons::{Icon, Logo, Svg};
+use crate::i18n::t;
 use crate::session::Session;
-use crate::settings::Settings;
 
 #[component]
 pub fn Login() -> Element {
-    let mut state = use_context::<AppState>();
-    // Prefill the last successful login so returning users only type the password.
-    let remembered = use_hook(Settings::load);
+    let state = use_context::<AppState>();
+    // Prefill the last login so returning users only type the password.
+    let remembered = state.settings.peek().clone();
     let returning = remembered.last_instance.is_some();
     let mut instance = use_signal(|| remembered.last_instance.clone().unwrap_or_else(|| "https://".to_string()));
     let mut username = use_signal(|| remembered.last_username.clone().unwrap_or_default());
@@ -17,79 +17,84 @@ pub fn Login() -> Element {
     let mut invite_code = use_signal(String::new);
     let mut register = use_signal(|| false);
     let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
 
     let mut submit = move || {
         if *busy.read() {
             return;
         }
         busy.set(true);
-        state.status.set(None);
+        error.set(None);
+        // Lives as long as this screen; on success the screen unmounts only
+        // after `signed_in` handed the session to the root scope.
         spawn(async move {
             // Clone out of the signals: their read guards must not live across `.await`.
             let (instance, username, password) = (instance.cloned(), username.cloned(), password.cloned());
             let code = invite_code.cloned();
             let code = Some(code.trim()).filter(|c| !c.is_empty());
-            let result = Session::start(&instance, &username, &password, *register.peek(), code).await;
+            let result = Session::login(instance.trim(), username.trim(), &password, *register.peek(), code).await;
             busy.set(false);
             match result {
-                Ok(session) => {
-                    Settings {
-                        last_instance: Some(session.api.base_url().to_owned()),
-                        last_username: Some(session.user.username.clone()),
-                    }
-                    .save();
-                    state.session.set(Some(session));
-                    // Outlives this component, which unmounts after login.
-                    spawn_forever(state.run_gateway());
-                }
-                Err(e) => state.status.set(Some(e)),
+                Ok(session) => state.signed_in(session),
+                Err(e) => error.set(Some(e)),
             }
         });
     };
 
     let registering = *register.read();
-    let title = if registering { "Create an account" } else { "Welcome back" };
-    let action = if registering { "Register" } else { "Log in" };
-    let toggle = if registering { "Already have an account? Log in" } else { "New here? Register" };
+    let (title, subtitle, action, toggle) = if registering {
+        (t("login.register_title"), t("login.register_subtitle"), t("login.register"), t("login.have_account"))
+    } else {
+        (t("login.title"), t("login.subtitle"), t("login.login"), t("login.no_account"))
+    };
 
     rsx! {
         div { class: "login",
-            div { class: "card",
-                h1 { class: "brand", "Sivryn" }
-                p { class: "muted", "{title}" }
-                label { "Instance" }
-                input {
-                    autofocus: !returning,
-                    value: "{instance}",
-                    oninput: move |e| instance.set(e.value()),
+            div { class: "login-card",
+                div { class: "login-brand",
+                    Logo { size: 44 }
+                    span { class: "wordmark", "Sivryn" }
                 }
-                label { "Username" }
-                input {
-                    value: "{username}",
-                    oninput: move |e| username.set(e.value()),
-                }
-                label { "Password" }
-                PasswordInput {
-                    value: password,
-                    autofocus: returning,
-                    on_enter: move |_| submit(),
-                }
-                if registering {
-                    label { "Invite code" }
+                h1 { "{title}" }
+                p { class: "muted", "{subtitle}" }
+                div { class: "field",
+                    label { class: "field-label", {t("login.instance")} }
                     input {
-                        value: "{invite_code}",
-                        placeholder: "Only needed if the instance is invite-only",
-                        oninput: move |e| invite_code.set(e.value()),
+                        class: "input",
+                        autofocus: !returning,
+                        value: "{instance}",
+                        placeholder: "https://chat.example.com",
+                        oninput: move |e| instance.set(e.value()),
                     }
                 }
-                if let Some(err) = state.status.read().as_ref() {
-                    p { class: "error", "{err}" }
+                div { class: "field",
+                    label { class: "field-label", {t("login.username")} }
+                    input { class: "input", value: "{username}", oninput: move |e| username.set(e.value()) }
                 }
-                button { class: "primary", onclick: move |_| submit(),
-                    if *busy.read() { "…" } else { "{action}" }
+                div { class: "field",
+                    label { class: "field-label", {t("login.password")} }
+                    PasswordInput { value: password, autofocus: returning, on_enter: move |_| submit() }
                 }
-                p { class: "link", onclick: move |_| register.toggle(), "{toggle}" }
+                if registering {
+                    div { class: "field",
+                        label { class: "field-label", {t("login.invite")} }
+                        input {
+                            class: "input",
+                            value: "{invite_code}",
+                            placeholder: t("login.invite_hint"),
+                            oninput: move |e| invite_code.set(e.value()),
+                        }
+                    }
+                }
+                if let Some(err) = error.read().as_ref() {
+                    div { class: "form-error", "{err}" }
+                }
+                button { class: if *busy.read() { "button primary block busy" } else { "button primary block" }, onclick: move |_| submit(),
+                    if *busy.read() { {t("common.wait")} } else { "{action}" }
+                }
+                p { class: "login-switch", onclick: move |_| register.toggle(), "{toggle}" }
             }
+            p { class: "login-footer", {t("login.footer")} }
         }
     }
 }
@@ -102,7 +107,7 @@ fn PasswordInput(value: Signal<String>, autofocus: bool, on_enter: EventHandler<
     let shown = *visible.read();
 
     rsx! {
-        div { class: "password-field",
+        div { class: "input password-field",
             input {
                 r#type: if shown { "text" } else { "password" },
                 autofocus,
@@ -114,32 +119,15 @@ fn PasswordInput(value: Signal<String>, autofocus: bool, on_enter: EventHandler<
                     }
                 },
             }
-            button {
+            div {
                 class: "eye",
-                title: if shown { "Hide password" } else { "Show password" },
+                title: if shown { t("login.hide_password") } else { t("login.show_password") },
                 onclick: move |_| visible.toggle(),
-                EyeIcon { crossed: shown }
-            }
-        }
-    }
-}
-
-#[component]
-fn EyeIcon(crossed: bool) -> Element {
-    rsx! {
-        svg {
-            width: "18",
-            height: "18",
-            view_box: "0 0 24 24",
-            fill: "none",
-            stroke: "#8b8d98",
-            stroke_width: "2",
-            stroke_linecap: "round",
-            stroke_linejoin: "round",
-            path { d: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" }
-            circle { cx: "12", cy: "12", r: "3" }
-            if crossed {
-                line { x1: "3", y1: "3", x2: "21", y2: "21" }
+                if shown {
+                    Svg { icon: Icon::EyeOff, size: 18 }
+                } else {
+                    Svg { icon: Icon::Eye, size: 18 }
+                }
             }
         }
     }

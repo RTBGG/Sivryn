@@ -62,7 +62,18 @@ pub async fn event_bus(config: &Config) -> anyhow::Result<EventBus> {
     }
 }
 
+/// Two rustls crypto backends end up in the dependency tree (aws-lc-rs and
+/// ring), so rustls can't pick one on its own and would panic on the first
+/// outgoing TLS connection (e.g. to LiveKit's API). Choose aws-lc-rs.
+fn install_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 pub fn router(state: AppState) -> Router {
+    install_crypto_provider();
     Router::new()
         .nest("/api/v1", routes::api())
         .route("/gateway", get(gateway::handler))

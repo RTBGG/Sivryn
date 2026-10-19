@@ -36,6 +36,8 @@ async-nats = { workspace = true, optional = true }
 rand.workspace = true
 sha2.workspace = true
 base64.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
 sivryn-client-core.workspace = true

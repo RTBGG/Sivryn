@@ -15,15 +15,18 @@ your GPU can encode it, and limits that you as the admin control.
 - **Screen sharing first.** Native capture (Windows Graphics Capture today; ScreenCaptureKit
   and PipeWire via the same code path later), hardware encoding, and AV1 with H.264 fallback.
   Temporal SVC keeps text sharp for viewers on weak connections.
-- **Voice and video** over a LiveKit SFU with echo cancellation, noise suppression,
-  simulcast and adaptive streaming.
+- **Voice and video** over a LiveKit SFU. Sivryn's own audio engine brings AI noise
+  suppression (DeepFilterNet3 or RNNoise), echo cancellation, voice activity or push-to-talk
+  with global hotkeys, per-user volume and screen share audio that never echoes your friends'
+  voices back. Cameras are published with simulcast.
 - **End-to-end encryption.** Text channels use MLS (RFC 9420). Voice and video can be
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
 - **Familiar model:** servers (guilds), text and voice channels, roles, permissions and invites.
 - **Easy to self-host:** Docker Compose with automatic HTTPS via Caddy, PostgreSQL and LiveKit.
   Media runs on two ports.
 - **Native desktop client** built with Dioxus Native: a GPU-rendered UI with no webview,
-  where video frames go straight into GPU textures.
+  where video frames go straight into GPU textures. Dark and light themes, German and English.
+  Logins, keys and message history are kept encrypted on the device.
 
 ## Self-hosting
 
@@ -129,11 +132,13 @@ build the image itself.
 - [x] LiveKit integration with per-source publish permissions
 - [x] Media engine: capture, AV1/H.264 selection with hardware detection, E2EE media keys
 - [x] Desktop client: login, servers, channels, encrypted chat, voice, screen share UI
-- [ ] Verify end-to-end on real hardware (codec negotiation, HW encoder use by libwebrtc)
-- [ ] Persist MLS state and sessions on the client (OS keychain + OpenMLS SQLite storage)
-- [ ] Screen share audio (WASAPI process loopback)
-- [ ] Camera video, device selection, push-to-talk
-- [ ] OIDC login, rate limiting, file attachments
+- [x] Verify end-to-end on one machine (AV1 hardware encoding, 1440p received by a viewer)
+- [x] Persist MLS state, sessions and message history on the client (credential store + SQLite)
+- [x] Own audio engine: DeepFilterNet3/RNNoise, echo cancellation, voice activity, push-to-talk
+- [x] Screen share audio (WASAPI process loopback), camera, device selection, per-user volume
+- [x] Settings, global hotkeys, dark/light theme, German/English UI
+- [ ] Verify across real networks (NAT, TURN) with several people
+- [ ] OIDC login, rate limiting, file attachments, message editing and replies
 - [ ] Linux and macOS clients, browser client, mobile
 
 ## License

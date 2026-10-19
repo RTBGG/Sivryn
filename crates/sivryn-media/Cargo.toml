@@ -16,6 +16,35 @@ tokio.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+cpal = "0.18"
+ringbuf = "0.4"
+rubato = "0.16"
+sonora = "0.2"
+zune-jpeg = "0.5.15"
+serde = { workspace = true, features = ["derive"] }
+nnnoiseless = { version = "0.5", default-features = false }
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
+# DeepFilterNet3 noise suppression. Only the GitHub version has the realtime
+# (tract) runtime; it needs tract 0.21.4 exactly (later 0.21.x switched to
+# ndarray 0.16, which libDF doesn't use yet).
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+tract-core = "=0.21.4"
+tract-onnx = "=0.21.4"
+tract-pulse = "=0.21.4"
+tract-hir = "=0.21.4"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+# The `#[implement]` macro expands to paths in `windows_core`.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -22,6 +22,21 @@ serde_json.workspace = true
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rusqlite = { version = "0.39", features = ["bundled"] }
+chacha20poly1305 = "0.11"
+keyring = "4"
+base64.workspace = true
+getrandom = "0.4.3"
+chrono = { workspace = true, features = ["clock"] }
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Registry",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [dev-dependencies]
 rustls.workspace = true

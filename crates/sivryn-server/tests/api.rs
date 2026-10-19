@@ -200,6 +200,12 @@ async fn key_packages_are_claimed_once_per_device_and_only_by_guild_mates() {
     assert_eq!(fourth.len(), 1);
     assert_eq!(fourth[0].key_package, "kp-l3");
 
+    // Devices can see how many packages they have left, so they know when to top up.
+    assert_eq!(app.get(&top_up, &alice.token).await.0, StatusCode::FORBIDDEN);
+    app.post(&top_up, &bob.token, json!({ "key_packages": ["kp-l4", "kp-l5"] })).await;
+    let left: Value = app.get_ok(&top_up, &bob.token).await;
+    assert_eq!(left["count"], 2);
+
     app.cleanup().await;
 }
 
@@ -281,6 +287,33 @@ async fn messages_validate_and_paginate() {
     let cts: Vec<&str> =
         page["messages"].as_array().unwrap().iter().map(|m| m["ciphertext"].as_str().unwrap()).collect();
     assert_eq!(cts, ["ct2", "ct1"]);
+
+    // `after` walks forwards (oldest first) for catching up.
+    let page: Value = app.get_ok(&format!("{path}?limit=2&after={}", sent[1].id), &alice.token).await;
+    let cts: Vec<&str> =
+        page["messages"].as_array().unwrap().iter().map(|m| m["ciphertext"].as_str().unwrap()).collect();
+    assert_eq!(cts, ["ct2", "ct3"]);
+    let page: Value = app.get_ok(&format!("{path}?after={}", sent[4].id), &alice.token).await;
+    assert!(page["messages"].as_array().unwrap().is_empty());
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn voice_presence_needs_membership_and_survives_livekit_outage() {
+    let Some(app) = TestApp::spawn(RegistrationMode::Open).await else { return };
+    let alice = app.register("alice").await;
+    let mallory = app.register("mallory").await;
+    let guild = create_guild(&app, &alice, "g").await;
+    let path = format!("/guilds/{}/voice", guild.guild.id);
+
+    assert_eq!(app.get(&path, &mallory.token).await.0, StatusCode::NOT_FOUND);
+    // No LiveKit in tests: every voice channel is listed, just empty.
+    let states: Value = app.get_ok(&path, &alice.token).await;
+    let states = states.as_array().unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0]["channel_id"], json!(voice_channel(&guild)));
+    assert!(states[0]["participants"].as_array().unwrap().is_empty());
 
     app.cleanup().await;
 }

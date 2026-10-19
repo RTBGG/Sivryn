@@ -17,6 +17,18 @@ pub enum ClientError {
     InvalidUrl(String),
 }
 
+impl ClientError {
+    /// The session token was rejected (expired or logged out elsewhere).
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, ClientError::Api { status, .. } if *status == StatusCode::UNAUTHORIZED)
+    }
+
+    /// The resource doesn't exist or isn't ours (e.g. a device the server forgot).
+    pub fn is_missing(&self) -> bool {
+        matches!(self, ClientError::Api { status, .. } if matches!(*status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN))
+    }
+}
+
 /// REST client for one Sivryn instance.
 #[derive(Clone)]
 pub struct ApiClient {
@@ -150,6 +162,9 @@ impl ApiClient {
         if let Some(before) = query.before {
             path.push_str(&format!("&before={before}"));
         }
+        if let Some(after) = query.after {
+            path.push_str(&format!("&after={after}"));
+        }
         Ok(self.get::<MessagePage>(&path).await?.messages)
     }
 
@@ -159,6 +174,27 @@ impl ApiClient {
 
     pub async fn register_device(&self, req: &RegisterDeviceRequest) -> Result<RegisterDeviceResponse, ClientError> {
         self.post("/devices", req).await
+    }
+
+    pub async fn key_package_count(&self, device: DeviceId) -> Result<u32, ClientError> {
+        Ok(self.get::<KeyPackageCount>(&format!("/devices/{device}/key-packages")).await?.count)
+    }
+
+    pub async fn upload_key_packages(&self, device: DeviceId, key_packages: Vec<String>) -> Result<(), ClientError> {
+        #[derive(Serialize)]
+        struct Upload {
+            key_packages: Vec<String>,
+        }
+        self.post(&format!("/devices/{device}/key-packages"), &Upload { key_packages }).await
+    }
+
+    pub async fn voice_states(&self, guild: GuildId) -> Result<Vec<VoiceChannelState>, ClientError> {
+        self.get(&format!("/guilds/{guild}/voice")).await
+    }
+
+    /// Ends the session on the server. The token is useless afterwards.
+    pub async fn logout(&self) -> Result<(), ClientError> {
+        self.post("/auth/logout", &()).await
     }
 
     pub async fn claim_key_packages(&self, user: UserId) -> Result<Vec<ClaimedKeyPackage>, ClientError> {

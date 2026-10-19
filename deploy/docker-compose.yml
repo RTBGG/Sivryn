@@ -19,6 +19,8 @@ services:
     environment:
       SIVRYN_DATABASE_URL: postgres://sivryn:${POSTGRES_PASSWORD}@postgres:5432/sivryn
       SIVRYN_LIVEKIT_URL: wss://${SIVRYN_DOMAIN}
+      # Voice presence (who is in which channel) is read from LiveKit's API directly.
+      SIVRYN_LIVEKIT_API_URL: http://livekit:7880
     depends_on:
       postgres:
         condition: service_healthy

@@ -35,6 +35,14 @@ puts screen sharing quality first, then easy self-hosting, then everything else.
 | E2EE | **MLS for text and media** | The server never sees content, and keys rotate on membership changes | No server-side search; devices must be added to groups |
 | Deployment | **Docker Compose + Caddy** | Automatic HTTPS, one domain, `setup.sh` generates secrets | Ports 80/443 must be free (otherwise disable the Caddy profile) |
 | License | **AGPL-3.0** | Hosted forks must share improvements | Some companies avoid AGPL |
+| Audio engine | **Own engine (cpal/WASAPI) instead of WebRTC's audio device module** | The microphone chain and playback are ours: noise filter choice, echo cancellation, voice activity / push-to-talk gate, per-user volume, output device, UI sounds | More code to maintain; WebRTC's ADM did device handling for free |
+| Noise suppression | **DeepFilterNet3 (default), RNNoise and WebRTC NS selectable** | DeepFilterNet removes keyboards, fans and background voices best (~1–3 % of a core, ~30 ms); RNNoise is the light option | DeepFilterNet only exists as a GitHub dependency and needs `tract` pinned to 0.21.4; +8 MB model in the binary |
+| Echo cancellation / AGC | **sonora** (pure Rust port of WebRTC AEC3 and AGC2) | Keeps echo cancellation with our own pipeline, no C++ build | Young crate (0.2); two of its crates are vendored (see `vendor/SIVRYN-PATCHES.md`) |
+| Local storage | **SQLite (bundled) + OS credential store** | MLS keys are single-use, so decrypted history must be kept locally; per-row XChaCha20-Poly1305 under a key in Windows Credential Manager, together with the session token | Channel/author IDs and timestamps are readable in the database |
+| Camera | **nokhwa (Media Foundation)** | Cross-platform later (V4L2, AVFoundation) without new code | MJPEG decoded on the CPU (zune-jpeg); NV12/YUY2 preferred when the camera offers them |
+| Global hotkeys | **Polling `GetAsyncKeyState` every 10 ms** | No keyboard hook: no input lag if the app stalls, nothing for anti-cheat to flag, mouse side buttons work | Up to 10 ms detection delay; Windows only for now |
+| Screen share audio | **WASAPI process loopback** | Window share: only that app's sound. Screen share: everything except Sivryn, so voices never echo back | Windows 10 2004 or newer |
+| UI design | **Graphite & violet, Inter bundled, dark + light** | Modern and calm; identical text rendering on every platform | +0.9 MB font in the binary |
 
 ## Screen sharing pipeline
 
@@ -72,10 +80,32 @@ CPU-intensive at 1440p60), plus end-to-end latency and quality against Discord.
   feeds LiveKit's frame encryption (AES-GCM). A new epoch (someone joins or leaves) means a
   new key.
 
-**Known MVP limits:** MLS state lives in memory, so every client start registers a new
-device. If two devices create the same channel group at the same moment, both stay in their
-own group until one of them re-joins. Messages sent before a device joined cannot be
+**Client state:** each device's MLS state (identity, signing key, groups, unused key
+packages) is exported after every change into an encrypted SQLite database, next to the
+decrypted message history. Groups keep the keys of the last 16 epochs, so after being offline
+a client applies missed commits first and still decrypts the messages sent in between
+(`GET /messages?after=`). Key packages are topped up when fewer than 20 are left
+(`GET /devices/{id}/key-packages`). Decrypted messages are stored before the MLS state that
+consumed their keys, so a crash can cause a refetch but never a lost message.
+
+**Known limits:** if two devices create the same channel group at the same moment, both stay
+in their own group until one of them re-joins. Messages sent before a device joined cannot be
 decrypted (forward secrecy by design).
+
+## Audio pipeline
+
+```
+mic ─ cpal ─ resample 48k ─ gain ─ HPF+AEC3 ─ noise filter ─ AGC2 ─ gate ─ LiveKit (Opus 64k, DTX, RED)
+                                      ▲
+LiveKit ─ per-user volume ─ mixer ─ cpal ─ speakers/headset
+          sounds, mic test ─┘   └─ far-end reference for AEC3
+```
+
+Everything runs in 10 ms frames at 48 kHz on two threads that exist only while needed
+(call, mic test, sound). Device callbacks only touch lock-free ring buffers. RNNoise always
+runs as the speech detector for automatic voice activity, whatever noise filter is selected.
+Screen share audio (process loopback) is published separately as `ScreenshareAudio`: Opus
+stereo at 128 kbit/s without DTX, with its own volume per viewer.
 
 ## Event flow
 

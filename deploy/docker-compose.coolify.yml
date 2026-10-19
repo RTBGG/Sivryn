@@ -28,6 +28,8 @@ services:
       - SIVRYN_DATABASE_URL=postgres://sivryn:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/sivryn
       # LiveKit's own domain; https:// is converted to wss:// by the server.
       - SIVRYN_LIVEKIT_URL=${SERVICE_URL_LIVEKIT}
+      # Voice presence (who is in which channel) is read from LiveKit's API directly.
+      - SIVRYN_LIVEKIT_API_URL=http://livekit:7880
       - LIVEKIT_API_KEY=sivryn
       - LIVEKIT_API_SECRET=${SERVICE_PASSWORD_64_LIVEKIT}
       - SIVRYN_INSTANCE_NAME=${SIVRYN_INSTANCE_NAME:-Sivryn}

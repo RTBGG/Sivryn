@@ -15,13 +15,18 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use sivryn_protocol::ChannelId;
 use sivryn_protocol::model::MessageContent;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 const MEDIA_KEY_LABEL: &str = "sivryn media e2ee v1";
 const MEDIA_KEY_LEN: usize = 32;
+/// Past epochs whose message keys are kept, so messages sent just before a
+/// commit (or fetched after catching up on commits) still decrypt.
+const MAX_PAST_EPOCHS: usize = 16;
+/// Format version of [`MlsDevice::export`].
+const EXPORT_VERSION: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
@@ -70,12 +75,43 @@ pub enum Incoming {
     Ignored,
 }
 
-/// The MLS state of one device.
-///
-/// TODO: groups currently live in memory only. Persist them with OpenMLS'
-/// sqlite storage provider so a restart doesn't require re-joining channels.
+/// OpenMLS provider whose in-memory storage can be exported and restored.
+#[derive(Default)]
+struct Provider {
+    crypto: RustCrypto,
+    storage: MemoryStorage,
+}
+
+impl OpenMlsProvider for Provider {
+    type CryptoProvider = RustCrypto;
+    type RandProvider = RustCrypto;
+    type StorageProvider = MemoryStorage;
+
+    fn storage(&self) -> &Self::StorageProvider {
+        &self.storage
+    }
+
+    fn crypto(&self) -> &Self::CryptoProvider {
+        &self.crypto
+    }
+
+    fn rand(&self) -> &Self::RandProvider {
+        &self.crypto
+    }
+}
+
+fn create_config() -> MlsGroupCreateConfig {
+    MlsGroupCreateConfig::builder().max_past_epochs(MAX_PAST_EPOCHS).build()
+}
+
+fn join_config() -> MlsGroupJoinConfig {
+    MlsGroupJoinConfig::builder().max_past_epochs(MAX_PAST_EPOCHS).build()
+}
+
+/// The MLS state of one device. Persist it with [`MlsDevice::export`] after
+/// every change and restore it with [`MlsDevice::import`].
 pub struct MlsDevice {
-    provider: OpenMlsRustCrypto,
+    provider: Provider,
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
     groups: HashMap<ChannelId, MlsGroup>,
@@ -84,7 +120,7 @@ pub struct MlsDevice {
 impl MlsDevice {
     /// Creates a new device identity. `identity` should be `"<user_id>:<device_id>"`.
     pub fn new(identity: &str) -> Result<Self, CryptoError> {
-        let provider = OpenMlsRustCrypto::default();
+        let provider = Provider::default();
         let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).map_err(mls_err)?;
         signer.store(provider.storage()).map_err(mls_err)?;
         let credential = CredentialWithKey {
@@ -92,6 +128,78 @@ impl MlsDevice {
             signature_key: signer.public().into(),
         };
         Ok(Self { provider, signer, credential, groups: HashMap::new() })
+    }
+
+    /// Serializes the whole device (identity, signing key, groups) for storage.
+    /// The output contains private keys: store it encrypted.
+    pub fn export(&self) -> Vec<u8> {
+        let mut out = vec![EXPORT_VERSION];
+        let mut put = |bytes: &[u8]| {
+            out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            out.extend_from_slice(bytes);
+        };
+        put(self.credential.credential.serialized_content());
+        put(self.signer.public());
+        put(&(self.signer.signature_scheme() as u16).to_be_bytes());
+        let channels: Vec<u8> = self.groups.keys().flat_map(|c| *c.0.as_bytes()).collect();
+        put(&channels);
+        let values = self.provider.storage.values.read().expect("storage lock");
+        put(&(values.len() as u64).to_be_bytes());
+        for (k, v) in values.iter() {
+            put(k);
+            put(v);
+        }
+        drop(values);
+        out
+    }
+
+    /// Restores a device from [`MlsDevice::export`].
+    pub fn import(data: &[u8]) -> Result<Self, CryptoError> {
+        let bad = || CryptoError::Encoding("corrupt device state".into());
+        let (&version, mut rest) = data.split_first().ok_or_else(bad)?;
+        if version != EXPORT_VERSION {
+            return Err(CryptoError::Encoding(format!("unsupported device state version {version}")));
+        }
+        let mut take = || -> Result<&[u8], CryptoError> {
+            let len = rest.get(..8).ok_or_else(bad)?;
+            let len = u64::from_be_bytes(len.try_into().expect("8 bytes")) as usize;
+            let bytes = rest.get(8..8usize.checked_add(len).ok_or_else(bad)?).ok_or_else(bad)?;
+            rest = &rest[8 + len..];
+            Ok(bytes)
+        };
+        let identity = take()?.to_vec();
+        let public_key = take()?.to_vec();
+        let scheme = u16::from_be_bytes(take()?.try_into().map_err(|_| bad())?);
+        let scheme = SignatureScheme::try_from(scheme).map_err(mls_err)?;
+        let channels: Vec<ChannelId> =
+            take()?.as_chunks::<16>().0.iter().map(|c| ChannelId(uuid::Uuid::from_bytes(*c))).collect();
+        let count = u64::from_be_bytes(take()?.try_into().map_err(|_| bad())?);
+        let mut values = HashMap::new();
+        for _ in 0..count {
+            let k = take()?.to_vec();
+            values.insert(k, take()?.to_vec());
+        }
+
+        let provider = Provider { crypto: RustCrypto::default(), storage: MemoryStorage { values: values.into() } };
+        let signer = SignatureKeyPair::read(provider.storage(), &public_key, scheme)
+            .ok_or_else(|| CryptoError::Encoding("signing key missing from device state".into()))?;
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(identity).into(),
+            signature_key: signer.public().into(),
+        };
+        let mut groups = HashMap::new();
+        for channel in channels {
+            let group_id = GroupId::from_slice(channel.0.as_bytes());
+            if let Some(group) = MlsGroup::load(provider.storage(), &group_id).map_err(mls_err)? {
+                groups.insert(channel, group);
+            }
+        }
+        Ok(Self { provider, signer, credential, groups })
+    }
+
+    /// Channels this device has a group for.
+    pub fn channels(&self) -> impl Iterator<Item = ChannelId> + '_ {
+        self.groups.keys().copied()
     }
 
     /// Generates `count` one-time key packages to upload to the server.
@@ -116,7 +224,9 @@ impl MlsDevice {
 
     /// Forgets a channel's group, e.g. after losing the race to create it.
     pub fn remove_group(&mut self, channel: ChannelId) {
-        self.groups.remove(&channel);
+        if let Some(mut group) = self.groups.remove(&channel) {
+            let _ = group.delete(self.provider.storage());
+        }
     }
 
     /// Starts a new group for a channel with this device as the only member.
@@ -124,7 +234,7 @@ impl MlsDevice {
         let group = MlsGroup::new_with_group_id(
             &self.provider,
             &self.signer,
-            &MlsGroupCreateConfig::default(),
+            &create_config(),
             GroupId::from_slice(channel.0.as_bytes()),
             self.credential.clone(),
         )
@@ -192,11 +302,10 @@ impl MlsDevice {
             _ => return Err(CryptoError::Encoding("not a welcome message".into())),
         };
         let tree = RatchetTreeIn::tls_deserialize(&mut decode(ratchet_tree)?.as_slice()).map_err(mls_err)?;
-        let group =
-            StagedWelcome::new_from_welcome(&self.provider, &MlsGroupJoinConfig::default(), welcome, Some(tree))
-                .map_err(mls_err)?
-                .into_group(&self.provider)
-                .map_err(mls_err)?;
+        let group = StagedWelcome::new_from_welcome(&self.provider, &join_config(), welcome, Some(tree))
+            .map_err(mls_err)?
+            .into_group(&self.provider)
+            .map_err(mls_err)?;
         let epoch = group.epoch().as_u64();
         self.groups.insert(channel, group);
         Ok(epoch)
@@ -282,6 +391,59 @@ mod tests {
         assert!(matches!(alice.process(channel, &reply).unwrap(), Incoming::Message(m) if m.body == "hi alice"));
 
         assert_eq!(alice.media_key(channel).unwrap(), bob.media_key(channel).unwrap());
+    }
+
+    #[test]
+    fn device_survives_export_and_import() {
+        let channel = ChannelId::new();
+        let mut alice = MlsDevice::new("alice:1").unwrap();
+        let bob = MlsDevice::new("bob:1").unwrap();
+        alice.create_group(channel).unwrap();
+        let pending = alice.add_members(channel, &bob.key_packages(1).unwrap()).unwrap();
+        alice.confirm_commit(channel).unwrap();
+
+        // Bob's key package was created before the export, so the restored
+        // device must still hold its private key to accept the welcome.
+        let mut bob = MlsDevice::import(&bob.export()).unwrap();
+        bob.join(channel, pending.welcome.as_deref().unwrap(), &pending.ratchet_tree).unwrap();
+        let mut bob = MlsDevice::import(&bob.export()).unwrap();
+        assert!(bob.has_group(channel));
+        assert_eq!(bob.channels().collect::<Vec<_>>(), vec![channel]);
+
+        let (_, ciphertext) = alice.encrypt(channel, &content("after restart")).unwrap();
+        assert!(
+            matches!(bob.process(channel, &ciphertext).unwrap(), Incoming::Message(m) if m.body == "after restart")
+        );
+        let (_, reply) = bob.encrypt(channel, &content("still here")).unwrap();
+        assert!(matches!(alice.process(channel, &reply).unwrap(), Incoming::Message(m) if m.body == "still here"));
+        assert_eq!(alice.media_key(channel).unwrap(), bob.media_key(channel).unwrap());
+    }
+
+    #[test]
+    fn messages_from_a_past_epoch_still_decrypt() {
+        let channel = ChannelId::new();
+        let mut alice = MlsDevice::new("alice:1").unwrap();
+        let mut bob = MlsDevice::new("bob:1").unwrap();
+        let carol = MlsDevice::new("carol:1").unwrap();
+        alice.create_group(channel).unwrap();
+        let pending = alice.add_members(channel, &bob.key_packages(1).unwrap()).unwrap();
+        alice.confirm_commit(channel).unwrap();
+        bob.join(channel, pending.welcome.as_deref().unwrap(), &pending.ratchet_tree).unwrap();
+
+        // Alice sends, then adds Carol. Bob applies the commit first (as when
+        // catching up after being offline) and reads the older message after.
+        let (_, old) = alice.encrypt(channel, &content("before carol")).unwrap();
+        let add = alice.add_members(channel, &carol.key_packages(1).unwrap()).unwrap();
+        alice.confirm_commit(channel).unwrap();
+        assert!(matches!(bob.process(channel, &add.commit).unwrap(), Incoming::EpochChanged { epoch: 2 }));
+        assert!(matches!(bob.process(channel, &old).unwrap(), Incoming::Message(m) if m.body == "before carol"));
+    }
+
+    #[test]
+    fn corrupt_state_is_rejected() {
+        let state = MlsDevice::new("alice:1").unwrap().export();
+        assert!(MlsDevice::import(&state[..state.len() / 2]).is_err());
+        assert!(MlsDevice::import(&[]).is_err());
     }
 
     #[test]

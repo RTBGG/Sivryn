@@ -24,6 +24,9 @@ impl HardwareEncoders {
     /// Asks Media Foundation which hardware encoders are installed.
     #[cfg(windows)]
     pub fn detect() -> Self {
+        if !crate::media_foundation_available() {
+            return Self::default();
+        }
         windows_mf::detect().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "hardware encoder detection failed; assuming none");
             Self::default()

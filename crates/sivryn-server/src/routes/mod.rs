@@ -22,6 +22,7 @@ pub fn api() -> Router<AppState> {
         .route("/guilds", get(guilds::list).post(guilds::create))
         .route("/guilds/{guild_id}", get(guilds::get))
         .route("/guilds/{guild_id}/members", get(guilds::members))
+        .route("/guilds/{guild_id}/voice", get(voice::guild_states))
         .route("/guilds/{guild_id}/channels", post(guilds::create_channel))
         .route("/guilds/{guild_id}/invites", post(guilds::create_invite))
         .route("/invites/{code}", post(guilds::accept_invite))
@@ -29,7 +30,7 @@ pub fn api() -> Router<AppState> {
         .route("/channels/{channel_id}/mls/commits", get(mls::commits_since).post(mls::commit))
         .route("/channels/{channel_id}/voice/join", post(voice::join))
         .route("/devices", post(mls::register_device))
-        .route("/devices/{device_id}/key-packages", post(mls::upload_key_packages))
+        .route("/devices/{device_id}/key-packages", get(mls::count_key_packages).post(mls::upload_key_packages))
         .route("/devices/{device_id}/welcomes", get(mls::take_welcomes))
         .route("/users/{user_id}/key-packages/claim", post(mls::claim_key_packages))
 }

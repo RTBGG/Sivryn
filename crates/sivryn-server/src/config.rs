@@ -27,6 +27,10 @@ pub struct Config {
 pub struct LiveKitConfig {
     /// URL handed to clients, e.g. `wss://chat.example.com`.
     pub public_url: String,
+    /// Where the server reaches LiveKit's HTTP API (to list participants).
+    /// Defaults to the public URL; set `SIVRYN_LIVEKIT_API_URL` to use an
+    /// internal address such as `http://livekit:7880`.
+    pub api_url: String,
     pub api_key: String,
     pub api_secret: String,
 }
@@ -76,6 +80,10 @@ impl Config {
             session_ttl_days: parse_or("SIVRYN_SESSION_TTL_DAYS", 30)?,
             livekit: LiveKitConfig {
                 public_url: websocket_url(&required("SIVRYN_LIVEKIT_URL")?)?,
+                api_url: match env::var("SIVRYN_LIVEKIT_API_URL") {
+                    Ok(url) if !url.trim().is_empty() => http_url(&url)?,
+                    _ => http_url(&required("SIVRYN_LIVEKIT_URL")?)?,
+                },
                 api_key: required("LIVEKIT_API_KEY")?,
                 api_secret: required("LIVEKIT_API_SECRET")?,
             },
@@ -121,6 +129,12 @@ fn websocket_url(url: &str) -> anyhow::Result<String> {
     Ok(converted)
 }
 
+/// The HTTP form of a LiveKit URL, for server-side API calls.
+fn http_url(url: &str) -> anyhow::Result<String> {
+    let ws = websocket_url(url)?;
+    Ok(ws.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1))
+}
+
 fn parse_codecs(list: &str) -> anyhow::Result<Vec<VideoCodec>> {
     list.split(',')
         .map(|c| match c.trim().to_ascii_lowercase().as_str() {
@@ -143,6 +157,8 @@ mod tests {
         assert_eq!(websocket_url("http://localhost:7880").unwrap(), "ws://localhost:7880");
         assert_eq!(websocket_url("wss://chat.example.com").unwrap(), "wss://chat.example.com");
         assert!(websocket_url("livekit.example.com").is_err());
+        assert_eq!(http_url("wss://livekit.example.com").unwrap(), "https://livekit.example.com");
+        assert_eq!(http_url("http://livekit:7880/").unwrap(), "http://livekit:7880");
     }
 
     #[test]

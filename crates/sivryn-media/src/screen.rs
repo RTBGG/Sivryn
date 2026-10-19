@@ -105,7 +105,7 @@ impl ScreenShare {
         let publication = room.local_participant().publish_track(LocalTrack::Video(track), options).await?;
 
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = spawn_capture(source.clone(), limits.clone(), video_source, stop.clone())?;
+        let thread = spawn_capture(source.clone(), limits.clone(), video_source, stop.clone()).await?;
 
         Ok(Self { stop, thread: Some(thread), room, track_sid: publication.sid(), codec })
     }
@@ -133,13 +133,14 @@ impl Drop for ScreenShare {
 
 /// Runs the capturer on its own thread: platform capturers are not `Send`
 /// and expect to be driven from the thread that created them.
-fn spawn_capture(
+async fn spawn_capture(
     source: ScreenSource,
     limits: ScreenShareLimits,
     video_source: NativeVideoSource,
     stop: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, MediaError> {
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    // Awaited, not blocked on: callers run on the UI thread.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
     let thread = std::thread::Builder::new()
         .name("sivryn-screen-capture".into())
@@ -191,7 +192,7 @@ fn spawn_capture(
         })
         .map_err(|_| MediaError::CaptureUnavailable)?;
 
-    ready_rx.recv().map_err(|_| MediaError::CaptureUnavailable)??;
+    ready_rx.await.map_err(|_| MediaError::CaptureUnavailable)??;
     Ok(thread)
 }
 

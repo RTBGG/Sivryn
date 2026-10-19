@@ -5,8 +5,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod chat;
+mod hotkeys;
+mod i18n;
 mod session;
 mod settings;
+mod store;
 mod ui;
 mod video_surface;
 
@@ -17,7 +20,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,sivryn_desktop=debug,sivryn_media=debug,sivryn_client_core=debug".into()),
+                .unwrap_or_else(|_| "warn,sivryn_desktop=info,sivryn_media=info,sivryn_client_core=info".into()),
         )
         .init();
     install_crash_log();

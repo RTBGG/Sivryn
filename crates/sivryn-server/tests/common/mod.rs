@@ -72,6 +72,8 @@ impl TestApp {
             session_ttl_days: 1,
             livekit: LiveKitConfig {
                 public_url: "wss://livekit.test".into(),
+                // Nothing listens here: voice presence must degrade gracefully.
+                api_url: "http://127.0.0.1:9".into(),
                 api_key: "test-key".into(),
                 api_secret: LIVEKIT_SECRET.into(),
             },

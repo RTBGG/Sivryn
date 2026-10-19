@@ -77,10 +77,15 @@ pub struct SendMessageRequest {
     pub ciphertext: String,
 }
 
-/// `GET /api/v1/channels/{id}/messages?before=&limit=`
+/// `GET /api/v1/channels/{id}/messages?before=&after=&limit=`
+///
+/// Without `after` the newest messages come first and `before` pages back
+/// through history. With `after` the oldest messages newer than it come first,
+/// which is how clients catch up after being offline.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MessageQuery {
     pub before: Option<MessageId>,
+    pub after: Option<MessageId>,
     pub limit: Option<u32>,
 }
 
@@ -102,6 +107,13 @@ pub struct RegisterDeviceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterDeviceResponse {
     pub device_id: DeviceId,
+}
+
+/// `GET /api/v1/devices/{id}/key-packages`: how many unclaimed key packages
+/// the server still holds for this device, so clients know when to top up.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct KeyPackageCount {
+    pub count: u32,
 }
 
 /// `POST /api/v1/users/{id}/key-packages/claim`: one key package per device.
@@ -158,4 +170,21 @@ pub struct VoiceJoinResponse {
     pub screen_share: ScreenShareLimits,
     pub camera: CameraLimits,
     pub e2ee: bool,
+}
+
+// --- Voice presence ---------------------------------------------------------
+
+/// `GET /api/v1/guilds/{id}/voice`: who is connected to each voice channel.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VoiceChannelState {
+    pub channel_id: ChannelId,
+    pub participants: Vec<VoiceParticipant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VoiceParticipant {
+    pub user_id: UserId,
+    pub muted: bool,
+    pub camera: bool,
+    pub screen_sharing: bool,
 }
