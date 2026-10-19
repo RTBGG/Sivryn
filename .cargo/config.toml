@@ -1,0 +1,4 @@
+# The prebuilt libwebrtc used by LiveKit links the static MSVC runtime (/MT),
+# so everything on Windows has to as well.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

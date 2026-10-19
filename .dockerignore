@@ -1,0 +1,5 @@
+/target
+/.git
+/deploy/.env
+**/*.md
+!README.md

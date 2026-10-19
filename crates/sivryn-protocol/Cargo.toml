@@ -1,0 +1,16 @@
+[package]
+name = "sivryn-protocol"
+description = "Shared wire types for the Sivryn REST API and realtime gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+bitflags.workspace = true

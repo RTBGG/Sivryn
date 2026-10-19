@@ -1,0 +1,22 @@
+[package]
+name = "sivryn-desktop"
+description = "Sivryn desktop client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+sivryn-protocol.workspace = true
+sivryn-client-core.workspace = true
+sivryn-crypto.workspace = true
+sivryn-media.workspace = true
+dioxus-native.workspace = true
+wgpu = "26"
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,16 @@
+# Everything runs on one domain: LiveKit signaling under /rtc and /twirp,
+# the Sivryn API and gateway under everything else. Caddy obtains and renews
+# the TLS certificate automatically.
+
+{$SIVRYN_DOMAIN} {
+	encode zstd gzip
+
+	@livekit path /rtc /rtc/* /twirp/*
+	handle @livekit {
+		reverse_proxy livekit:7880
+	}
+
+	handle {
+		reverse_proxy sivryn:8080
+	}
+}

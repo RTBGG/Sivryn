@@ -1,0 +1,25 @@
+# LiveKit SFU configuration for Sivryn. API keys come from LIVEKIT_KEYS.
+# Reference: https://docs.livekit.io/home/self-hosting/deployment/
+
+port: 7880
+
+rtc:
+  # ICE over TCP for networks that block UDP.
+  tcp_port: 7881
+  # All UDP media multiplexed on a single port: easy to forward, no port range.
+  udp_port: 7882
+  # Discover the public IP via STUN so clients behind NAT can reach the server.
+  use_external_ip: true
+
+# The embedded TURN server needs its own domain and TLS certificate. Most
+# setups work without it thanks to the TCP fallback above; enable it if users
+# behind strict corporate firewalls cannot connect.
+turn:
+  enabled: false
+
+room:
+  # Close rooms 5 minutes after the last participant left.
+  empty_timeout: 300
+
+logging:
+  level: info

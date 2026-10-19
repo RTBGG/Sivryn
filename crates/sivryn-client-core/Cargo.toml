@@ -1,0 +1,21 @@
+[package]
+name = "sivryn-client-core"
+description = "Sivryn client library: REST API and gateway client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+sivryn-protocol.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true

@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sivryn-protocol",
+    "crates/sivryn-server",
+    "crates/sivryn-client-core",
+    "crates/sivryn-crypto",
+    "crates/sivryn-media",
+    "apps/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sivryn/sivryn"
+homepage = "https://sivryn.com"
+authors = ["The Sivryn Contributors"]
+
+[workspace.dependencies]
+# internal
+sivryn-protocol = { path = "crates/sivryn-protocol" }
+sivryn-client-core = { path = "crates/sivryn-client-core" }
+sivryn-crypto = { path = "crates/sivryn-crypto" }
+sivryn-media = { path = "crates/sivryn-media" }
+
+# async / runtime
+tokio = { version = "1.53", features = ["full"] }
+futures = "0.3"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# common types
+uuid = { version = "1.28", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bitflags = "2"
+
+# errors & logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# server
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
+argon2 = "0.6"
+livekit-api = { version = "0.9", default-features = false, features = ["access-token"] }
+async-nats = "0.50"
+rand = "0.10"
+sha2 = "0.11"
+base64 = "0.23"
+
+# client
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+
+# media
+livekit = { version = "0.9", features = ["rustls-tls-webpki-roots"] }
+
+# crypto
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_basic_credential = "0.6"
+
+# ui
+dioxus-native = { version = "0.7", features = ["prelude"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

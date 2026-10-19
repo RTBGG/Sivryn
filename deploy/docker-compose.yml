@@ -1,0 +1,82 @@
+# Sivryn self-hosting stack.
+#
+#   cp .env.example .env   (or run ./setup.sh to generate secrets)
+#   docker compose up -d
+#
+# Services: sivryn (API + gateway), postgres, livekit (voice/video SFU) and,
+# unless you remove "caddy" from COMPOSE_PROFILES, caddy for automatic HTTPS.
+
+name: sivryn
+
+services:
+  sivryn:
+    image: ghcr.io/sivryn/sivryn-server:${SIVRYN_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SIVRYN_DATABASE_URL: postgres://sivryn:${POSTGRES_PASSWORD}@postgres:5432/sivryn
+      SIVRYN_LIVEKIT_URL: wss://${SIVRYN_DOMAIN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Reachable from the host for people running their own reverse proxy.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sivryn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: sivryn
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sivryn -d sivryn"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  livekit:
+    image: livekit/livekit-server:v1.13
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "127.0.0.1:7880:7880"   # signaling, proxied by Caddy at /rtc
+      - "7881:7881/tcp"         # media over TCP (fallback for UDP-hostile networks)
+      - "7882:7882/udp"         # media over UDP, all participants on one port
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["caddy"]
+    restart: unless-stopped
+    environment:
+      SIVRYN_DOMAIN: ${SIVRYN_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Only needed when running several sivryn instances; enable with
+  # COMPOSE_PROFILES=caddy,nats and SIVRYN_NATS_URL=nats://nats:4222.
+  nats:
+    image: nats:2-alpine
+    profiles: ["nats"]
+    restart: unless-stopped
+
+volumes:
+  postgres:
+  caddy_data:
+  caddy_config:

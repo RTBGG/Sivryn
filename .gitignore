@@ -1,0 +1,5 @@
+/target
+/deploy/.env
+/apps/desktop/dist
+*.db
+.DS_Store

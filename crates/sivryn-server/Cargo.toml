@@ -1,0 +1,43 @@
+[package]
+name = "sivryn-server"
+description = "Sivryn backend: REST API, realtime gateway and MLS delivery service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+default = ["nats"]
+# Fan out gateway events across several server instances via NATS.
+nats = ["dep:async-nats"]
+
+[dependencies]
+sivryn-protocol.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+axum.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+livekit-api.workspace = true
+async-nats = { workspace = true, optional = true }
+rand.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+sivryn-client-core.workspace = true
+sivryn-crypto.workspace = true
+reqwest.workspace = true
