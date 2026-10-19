@@ -1,5 +1,6 @@
 //! Main layout: guild rail, channel sidebar and the content area.
 
+use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
 use sivryn_client_core::protocol::model::ChannelKind;
 
@@ -116,6 +117,8 @@ fn Sidebar() -> Element {
 fn ModalView() -> Element {
     let mut state = use_context::<AppState>();
     let mut text = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
     let Some(modal) = *state.modal.read() else { return rsx! {} };
 
     if modal == Modal::PickScreen {
@@ -127,24 +130,31 @@ fn ModalView() -> Element {
         _ => ("Join a server", "Invite code"),
     };
 
-    let confirm = move |_| {
+    // The dialog stays open until the request is done: a task spawned here is
+    // cancelled as soon as this component unmounts.
+    let mut confirm = move || {
         let Some(s) = state.session.cloned() else { return };
         let value = text.read().trim().to_owned();
-        if value.is_empty() {
+        if value.is_empty() || *busy.read() {
             return;
         }
-        state.modal.set(None);
+        busy.set(true);
+        error.set(None);
         spawn(async move {
             let result = match modal {
                 Modal::CreateGuild => s.api.create_guild(&value).await,
                 _ => s.api.accept_invite(&value).await,
             };
+            busy.set(false);
             match result {
                 Ok(g) => {
                     state.guild.set(Some(g.guild.id));
-                    state.report(state.refresh().await);
+                    state.channel.set(g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
+                    state.modal.set(None);
+                    // Keep refreshing even though this dialog is gone now.
+                    spawn_forever(async move { state.report(state.refresh().await) });
                 }
-                Err(e) => state.report(Err(e.to_string())),
+                Err(e) => error.set(Some(e.to_string())),
             }
         });
     };
@@ -153,10 +163,25 @@ fn ModalView() -> Element {
         div { class: "overlay",
             div { class: "card",
                 h2 { "{title}" }
-                input { value: "{text}", placeholder: "{placeholder}", oninput: move |e| text.set(e.value()) }
+                input {
+                    autofocus: "true",
+                    value: "{text}",
+                    placeholder: "{placeholder}",
+                    oninput: move |e| text.set(e.value()),
+                    onkeydown: move |e| {
+                        if e.key() == Key::Enter {
+                            confirm();
+                        }
+                    },
+                }
+                if let Some(err) = error.read().as_ref() {
+                    p { class: "error", "{err}" }
+                }
                 div { class: "row",
                     button { onclick: move |_| state.modal.set(None), "Cancel" }
-                    button { class: "primary", onclick: confirm, "OK" }
+                    button { class: "primary", onclick: move |_| confirm(),
+                        if *busy.read() { "…" } else { "OK" }
+                    }
                 }
             }
         }

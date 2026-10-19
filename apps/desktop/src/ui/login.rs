@@ -3,12 +3,16 @@ use dioxus_native::prelude::*;
 
 use super::AppState;
 use crate::session::Session;
+use crate::settings::Settings;
 
 #[component]
 pub fn Login() -> Element {
     let mut state = use_context::<AppState>();
-    let mut instance = use_signal(|| "https://".to_string());
-    let mut username = use_signal(String::new);
+    // Prefill the last successful login so returning users only type the password.
+    let remembered = use_hook(Settings::load);
+    let returning = remembered.last_instance.is_some();
+    let mut instance = use_signal(|| remembered.last_instance.clone().unwrap_or_else(|| "https://".to_string()));
+    let mut username = use_signal(|| remembered.last_username.clone().unwrap_or_default());
     let password = use_signal(String::new);
     let mut invite_code = use_signal(String::new);
     let mut register = use_signal(|| false);
@@ -29,6 +33,11 @@ pub fn Login() -> Element {
             busy.set(false);
             match result {
                 Ok(session) => {
+                    Settings {
+                        last_instance: Some(session.api.base_url().to_owned()),
+                        last_username: Some(session.user.username.clone()),
+                    }
+                    .save();
                     state.session.set(Some(session));
                     // Outlives this component, which unmounts after login.
                     spawn_forever(state.run_gateway());
@@ -50,7 +59,7 @@ pub fn Login() -> Element {
                 p { class: "muted", "{title}" }
                 label { "Instance" }
                 input {
-                    autofocus: "true",
+                    autofocus: !returning,
                     value: "{instance}",
                     oninput: move |e| instance.set(e.value()),
                 }
@@ -62,6 +71,7 @@ pub fn Login() -> Element {
                 label { "Password" }
                 PasswordInput {
                     value: password,
+                    autofocus: returning,
                     on_enter: move |_| submit(),
                 }
                 if registering {
@@ -86,7 +96,7 @@ pub fn Login() -> Element {
 
 /// Masked password field with an eye button to reveal the text.
 #[component]
-fn PasswordInput(value: Signal<String>, on_enter: EventHandler<()>) -> Element {
+fn PasswordInput(value: Signal<String>, autofocus: bool, on_enter: EventHandler<()>) -> Element {
     let mut value = value;
     let mut visible = use_signal(|| false);
     let shown = *visible.read();
@@ -95,6 +105,7 @@ fn PasswordInput(value: Signal<String>, on_enter: EventHandler<()>) -> Element {
         div { class: "password-field",
             input {
                 r#type: if shown { "text" } else { "password" },
+                autofocus,
                 value: "{value}",
                 oninput: move |e| value.set(e.value()),
                 onkeydown: move |e| {

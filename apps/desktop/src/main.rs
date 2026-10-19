@@ -6,6 +6,7 @@
 
 mod chat;
 mod session;
+mod settings;
 mod ui;
 mod video_surface;
 

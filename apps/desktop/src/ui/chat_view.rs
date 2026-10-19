@@ -1,3 +1,4 @@
+use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
 use sivryn_client_core::protocol::ChannelId;
 use sivryn_client_core::protocol::api::MessageQuery;
@@ -44,7 +45,8 @@ pub fn ChatView(channel: ChannelId) -> Element {
             return;
         }
         draft.set(String::new());
-        spawn(async move {
+        // Don't lose the message if the user switches channels mid-send.
+        spawn_forever(async move {
             match chat::send(&s, channel, body).await {
                 Ok(line) => state.messages.write().entry(channel).or_default().push(line),
                 Err(e) => state.report(Err(e)),

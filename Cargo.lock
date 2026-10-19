@@ -7464,6 +7464,8 @@ dependencies = [
  "dioxus-native",
  "futures",
  "rustls",
+ "serde",
+ "serde_json",
  "sivryn-client-core",
  "sivryn-crypto",
  "sivryn-media",

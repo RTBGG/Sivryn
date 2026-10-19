@@ -42,11 +42,12 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
 pub struct VideoSurface {
     frames: watch::Receiver<Option<Arc<RgbaFrame>>>,
     gpu: Option<Gpu>,
+    logged_first_render: bool,
 }
 
 impl VideoSurface {
     pub fn new(frames: watch::Receiver<Option<Arc<RgbaFrame>>>) -> Self {
-        Self { frames, gpu: None }
+        Self { frames, gpu: None, logged_first_render: false }
     }
 }
 
@@ -255,6 +256,10 @@ impl CustomPaintSource for VideoSurface {
     }
 
     fn render(&mut self, mut ctx: CustomPaintCtx<'_>, width: u32, height: u32, _scale: f64) -> Option<TextureHandle> {
+        if !self.logged_first_render {
+            tracing::debug!(width, height, gpu_ready = self.gpu.is_some(), "video surface first render");
+            self.logged_first_render = true;
+        }
         if width == 0 || height == 0 {
             return None;
         }
@@ -263,6 +268,9 @@ impl CustomPaintSource for VideoSurface {
         if self.frames.has_changed().unwrap_or(false) {
             let latest = self.frames.borrow_and_update().clone();
             if let Some(frame) = latest {
+                if gpu.frame.is_none() {
+                    tracing::debug!(width = frame.width, height = frame.height, "first video frame uploaded to GPU");
+                }
                 gpu.upload(&frame);
             }
         }

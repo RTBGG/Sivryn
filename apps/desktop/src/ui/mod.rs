@@ -169,18 +169,25 @@ impl AppState {
 
 #[component]
 pub fn App() -> Element {
-    let state = AppState {
-        session: use_signal(|| None),
-        guilds: use_signal(Vec::new),
-        users: use_signal(HashMap::new),
-        guild: use_signal(|| None),
-        channel: use_signal(|| None),
-        messages: use_signal(HashMap::new),
-        groups_ready: use_signal(HashSet::new),
-        call: use_signal(|| None),
-        modal: use_signal(|| None),
-        status: use_signal(|| None),
-    };
+    // Owned by the root scope: long-running tasks (gateway, calls) run there
+    // via `spawn_forever` and use this state.
+    let state = use_hook(|| {
+        fn root<T: 'static>(value: T) -> Signal<T> {
+            Signal::new_in_scope(value, ScopeId::ROOT)
+        }
+        AppState {
+            session: root(None),
+            guilds: root(Vec::new()),
+            users: root(HashMap::new()),
+            guild: root(None),
+            channel: root(None),
+            messages: root(HashMap::new()),
+            groups_ready: root(HashSet::new()),
+            call: root(None),
+            modal: root(None),
+            status: root(None),
+        }
+    });
     use_context_provider(|| state);
 
     rsx! {

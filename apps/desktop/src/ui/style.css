@@ -80,8 +80,9 @@ input {
 .call { display: flex; flex-direction: column; flex-grow: 1; min-height: 0; background: #0b0c0e; }
 .stage { display: flex; flex-wrap: wrap; flex-grow: 1; gap: 8px; padding: 8px; overflow-y: auto; }
 .tile { position: relative; width: 320px; height: 180px; background: #000000; border-radius: 8px; }
-.tile.screen { width: 100%; height: 70%; }
-.video { width: 100%; height: 100%; }
+.tile.screen { width: 100%; height: auto; aspect-ratio: 16 / 9; max-height: 100%; }
+/* Absolutely positioned so the percentages resolve against the tile's laid-out size. */
+.video { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
 .label { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 4px; background: #000000aa; }
 .controls { display: flex; gap: 8px; justify-content: center; padding: 12px; background: #15161a; }
 

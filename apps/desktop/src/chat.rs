@@ -53,6 +53,11 @@ pub async fn ensure_group(s: &Session, guild: GuildId, channel: ChannelId) -> Re
         return Ok(false);
     }
 
+    // Opening a channel can run this twice at once; whichever call gets here
+    // second finds the group the first one just created.
+    if s.mls.borrow().has_group(channel) {
+        return Ok(true);
+    }
     s.mls.borrow_mut().create_group(channel).map_err(|e| e.to_string())?;
     let members = s.api.members(guild).await.map_err(|e| e.to_string())?;
     for member in members.into_iter().filter(|m| m.id != s.user.id) {

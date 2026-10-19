@@ -47,7 +47,10 @@ impl VoiceCall {
 
         let mut options = RoomOptions::default();
         options.auto_subscribe = true;
-        options.adaptive_stream = true;
+        // Adaptive stream picks layers from the size of the rendering element,
+        // which this client doesn't report, so it would stick to the lowest
+        // quality. The SFU's bandwidth estimation still adapts per viewer.
+        options.adaptive_stream = false;
         options.dynacast = true;
         options.encryption =
             key_provider.clone().map(|key_provider| E2eeOptions { encryption_type: EncryptionType::Gcm, key_provider });

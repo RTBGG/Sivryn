@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
 use dioxus_native::use_wgpu;
 use sivryn_client_core::protocol::ChannelId;
@@ -22,7 +23,9 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
         let Some(s) = state.session.cloned() else { return };
         let Some(guild) = state.guild_of(channel) else { return };
         joining.set(true);
-        spawn(async move {
+        // Runs in the root scope: this component unmounts as soon as the call
+        // view takes over, which would cancel a task spawned here.
+        spawn_forever(async move {
             let result: Result<(), String> = async {
                 if let Some(old) = state.call.take() {
                     leave(old).await;
@@ -41,6 +44,9 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
                     state.report(Err(format!("microphone unavailable: {e}")));
                 }
 
+                // Reset before switching views: `joining` belongs to this
+                // component and is dropped once the call view is shown.
+                joining.set(false);
                 state.call.set(Some(CallState {
                     channel,
                     join,
@@ -52,7 +58,7 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
                     sharing: false,
                 }));
 
-                spawn(async move {
+                spawn_forever(async move {
                     while let Some(event) = events.recv().await {
                         let mut call = state.call.write();
                         let Some(c) = call.as_mut().filter(|c| c.channel == channel) else { break };
@@ -71,8 +77,10 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
                 Ok(())
             }
             .await;
-            joining.set(false);
-            state.report(result);
+            if let Err(e) = result {
+                joining.set(false);
+                state.report(Err(e));
+            }
         });
     };
 
@@ -140,7 +148,7 @@ pub fn CallView() -> Element {
                                 c.share.borrow_mut().take()
                             });
                             if let Some(share) = share {
-                                spawn(share.stop());
+                                spawn_forever(share.stop());
                             }
                         },
                         "Stop sharing"
@@ -152,7 +160,8 @@ pub fn CallView() -> Element {
                     class: "danger",
                     onclick: move |_| {
                         if let Some(call) = state.call.take() {
-                            spawn(leave(call));
+                            // This view unmounts right away; leaving must still finish.
+                            spawn_forever(leave(call));
                         }
                     },
                     "Leave"
@@ -183,25 +192,36 @@ pub fn ScreenPicker() -> Element {
     let mut state = use_context::<AppState>();
     let sources = use_hook(list_sources);
     let mut hint = use_signal(|| ContentHint::Detail);
+    let mut starting = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
 
+    // The picker stays open until the share has started; closing it earlier
+    // would cancel the task spawned here.
     let mut pick = move |source: ScreenSource| {
-        state.modal.set(None);
+        if *starting.read() {
+            return;
+        }
         let Some(c) = state.call.cloned() else { return };
         let Some(room) = c.call.borrow().as_ref().map(|vc| vc.room.clone()) else { return };
         let limits = c.join.screen_share.clone();
         let content_hint = *hint.read();
+        starting.set(true);
+        error.set(None);
         spawn(async move {
             // TODO: collect decoder support from participants instead of assuming it.
             let viewers = [VideoCodec::Av1, VideoCodec::H264];
-            match ScreenShare::start(room, &source, &limits, content_hint, &viewers).await {
+            let result = ScreenShare::start(room, &source, &limits, content_hint, &viewers).await;
+            starting.set(false);
+            match result {
                 Ok(share) => {
                     tracing::info!(codec = ?share.codec, "screen share started");
                     *c.share.borrow_mut() = Some(share);
                     if let Some(c) = state.call.write().as_mut() {
                         c.sharing = true;
                     }
+                    state.modal.set(None);
                 }
-                Err(e) => state.report(Err(e.to_string())),
+                Err(e) => error.set(Some(e.to_string())),
             }
         });
     };
@@ -234,6 +254,12 @@ pub fn ScreenPicker() -> Element {
                             "{source.title}"
                         }
                     }
+                }
+                if *starting.read() {
+                    p { class: "muted", "Starting…" }
+                }
+                if let Some(err) = error.read().as_ref() {
+                    p { class: "error", "{err}" }
                 }
                 button { onclick: move |_| state.modal.set(None), "Cancel" }
             }
