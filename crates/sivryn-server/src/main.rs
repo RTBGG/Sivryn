@@ -7,7 +7,7 @@ use sivryn_server::{AppState, connect_db, event_bus, router};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
-    // The image is distroless (no shell, no curl), so container health checks
+    // The image ships no curl or wget, so container health checks
     // call the binary itself: `sivryn-server healthcheck`.
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
         return healthcheck();
