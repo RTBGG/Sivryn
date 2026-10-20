@@ -55,6 +55,8 @@ pub struct VoiceCall {
     mic: Option<LocalAudioTrack>,
     engine: AudioEngine,
     key_provider: Option<KeyProvider>,
+    /// Opus bitrate for the microphone, set by the guild.
+    audio_bitrate: u32,
 }
 
 impl VoiceCall {
@@ -189,7 +191,7 @@ impl VoiceCall {
             }
         });
 
-        Ok((Self { room, mic: None, engine, key_provider }, rx))
+        Ok((Self { room, mic: None, engine, key_provider, audio_bitrate: join.audio_bitrate }, rx))
     }
 
     /// Publishes the microphone through Sivryn's audio engine (noise filter,
@@ -204,9 +206,9 @@ impl VoiceCall {
         let track = LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source.clone()));
         let options = TrackPublishOptions {
             source: TrackSource::Microphone,
-            // Opus at 64 kbit/s: clearly better than the 32 kbit/s typical for
-            // voice chat, still tiny next to screen sharing.
-            audio_encoding: Some(AudioEncoding { max_bitrate: 64_000 }),
+            // The guild's bitrate (128 kbit/s by default): well above the
+            // 32 kbit/s typical for voice chat, still tiny next to screen sharing.
+            audio_encoding: Some(AudioEncoding { max_bitrate: u64::from(self.audio_bitrate) }),
             dtx: true,
             red: true,
             ..Default::default()
@@ -236,6 +238,22 @@ impl VoiceCall {
             // in-flight frames from the previous epoch still decrypt.
             provider.set_shared_key(key, (epoch % 16) as i32);
         }
+    }
+
+    /// Changes the microphone bitrate; a published microphone is published
+    /// again so the new bitrate applies right away.
+    pub async fn set_audio_bitrate(&mut self, bitrate: u32) -> Result<(), MediaError> {
+        if bitrate == self.audio_bitrate {
+            return Ok(());
+        }
+        self.audio_bitrate = bitrate;
+        let Some(track) = self.mic.take() else { return Ok(()) };
+        let muted = track.is_muted();
+        self.engine.attach_microphone(None);
+        self.room.local_participant().unpublish_track(&track.sid()).await?;
+        self.enable_microphone().await?;
+        self.set_muted(muted);
+        Ok(())
     }
 
     pub async fn leave(self) {

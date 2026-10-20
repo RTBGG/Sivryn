@@ -10,16 +10,17 @@ use dioxus_native::use_wgpu;
 use sivryn_client_core::protocol::ChannelId;
 use sivryn_client_core::protocol::media::{ContentHint, VideoCodec};
 use sivryn_media::{
-    CallEvent, CameraShare, LoopbackTarget, ScreenAudio, ScreenShare, ScreenSource, Sound, SourceKind, TrackSource,
-    VideoFeed, VoiceCall, list_sources, screen_volume_key, window_process,
+    CallEvent, CameraShare, LoopbackTarget, ScreenAudio, ScreenShare, ScreenSource, Sound, SourceKind, SourcePreviews,
+    TrackSource, VideoFeed, VoiceCall, list_sources, screen_volume_key, window_process,
 };
 
 use super::icons::{Icon, Svg};
+use super::media::{FrameCanvas, Frames};
 use super::widgets::{Avatar, IconButton, Toggle};
-use super::{AppState, CallState, Modal, Participant, Services};
+use super::{AppState, CallState, Focus, Modal, Participant, Services};
 use crate::chat;
 use crate::i18n::t;
-use crate::settings::ScreenQuality;
+use crate::settings::{SCREEN_FPS, ScreenResolution};
 use crate::video_surface::VideoSurface;
 
 #[component]
@@ -108,6 +109,8 @@ async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::
         sharing: false,
         camera_on: false,
         focus: None,
+        auto_focus: true,
+        strip_hidden: false,
     }));
     spawn_forever(state.refresh_voice());
 
@@ -126,7 +129,7 @@ async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::
                 CallEvent::VideoAdded(feed) => c.feeds.push(feed),
                 CallEvent::VideoRemoved { track_sid } => {
                     c.feeds.retain(|f| f.track_sid != track_sid);
-                    if c.focus.as_deref() == Some(track_sid.as_str()) {
+                    if c.focus == Some(Focus::Screen(track_sid.clone())) {
                         c.focus = None;
                     }
                 }
@@ -264,21 +267,36 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
     let call = state.call.read();
     let Some(c) = call.as_ref() else { return rsx! {} };
     let name = state.channel_name(c.channel);
+    let channel = c.channel;
 
-    // Screen shares can be focused; the focused one is shown large.
+    // One screen share or participant can be shown large; the rest go into
+    // a strip below (which can be hidden).
     let screens: Vec<VideoFeed> = c.feeds.iter().filter(|f| f.source == TrackSource::Screenshare).cloned().collect();
-    let focused = c
+    let focus = c
         .focus
-        .as_ref()
-        .and_then(|sid| c.feeds.iter().find(|f| &f.track_sid == sid))
-        .or_else(|| screens.first())
-        .cloned();
+        .clone()
+        .filter(|f| match f {
+            Focus::Screen(sid) => screens.iter().any(|s| &s.track_sid == sid),
+            Focus::User(id) => c.participants.iter().any(|p| &p.identity == id),
+        })
+        .or_else(|| screens.first().filter(|_| c.auto_focus).map(|s| Focus::Screen(s.track_sid.clone())));
     let participants = c.participants.clone();
     let speakers = c.speakers.clone();
     let cameras: Vec<VideoFeed> = c.feeds.iter().filter(|f| f.source == TrackSource::Camera).cloned().collect();
-    let other_screens: Vec<VideoFeed> =
-        screens.iter().filter(|f| Some(&f.track_sid) != focused.as_ref().map(|x| &x.track_sid)).cloned().collect();
+    let strip_hidden = c.strip_hidden;
     let (sharing, camera_on) = (c.sharing, c.camera_on);
+    let big_screen = match &focus {
+        Some(Focus::Screen(sid)) => screens.iter().find(|s| &s.track_sid == sid).cloned(),
+        _ => None,
+    };
+    let big_user = match &focus {
+        Some(Focus::User(id)) => participants.iter().find(|p| &p.identity == id).cloned(),
+        _ => None,
+    };
+    let other_screens: Vec<VideoFeed> =
+        screens.iter().filter(|s| Some(&s.track_sid) != big_screen.as_ref().map(|b| &b.track_sid)).cloned().collect();
+    let other_people: Vec<Participant> =
+        participants.iter().filter(|p| Some(&p.identity) != big_user.as_ref().map(|b| &b.identity)).cloned().collect();
     drop(call);
     let muted = *state.muted.read() || *state.deafened.read();
     let deafened = *state.deafened.read();
@@ -293,24 +311,53 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
                 span { class: "e2ee-badge", Svg { icon: Icon::ShieldCheck, size: 14 } {t("call.e2ee")} }
                 span { class: "topbar-spacer" }
                 span { class: "muted small", "{count} {t(\"call.in_call\")}" }
+                // Voice channels have a chat of their own.
+                if state.channel_kind(channel) == Some(sivryn_client_core::protocol::model::ChannelKind::Voice) {
+                    IconButton { icon: Icon::Message, size: 18, title: t("channels.open_chat"), onclick: move |_| state.voice_chat.set(true) }
+                }
             }
             }
-            div { class: if focused.is_some() { "stage focus" } else { "stage" },
-                if let Some(feed) = focused.clone() {
+            div { class: if focus.is_some() { "stage focus" } else { "stage" },
+                if let Some(feed) = big_screen.clone() {
                     div { class: "stage-main",
                         VideoTile { key: "{feed.track_sid}", feed, large: true }
                     }
                 }
-                div { class: "stage-grid",
-                    for feed in other_screens {
-                        VideoTile { key: "{feed.track_sid}", feed: feed.clone(), large: false }
-                    }
-                    for p in participants {
+                if let Some(p) = big_user.clone() {
+                    div { class: "stage-main",
                         ParticipantTile {
                             key: "{p.identity}",
                             camera: cameras.iter().find(|f| f.participant == p.identity).cloned(),
                             speaking: speakers.contains(&p.identity),
                             participant: p,
+                            large: true,
+                        }
+                    }
+                }
+                if focus.is_some() {
+                    div { class: "strip-toggle",
+                        onclick: move |_| {
+                            if let Some(c) = state.call.write().as_mut() {
+                                c.strip_hidden = !c.strip_hidden;
+                            }
+                        },
+                        if strip_hidden { Svg { icon: Icon::ChevronDown, size: 14 } } else { Svg { icon: Icon::ChevronRight, size: 14 } }
+                        if strip_hidden { {t("call.show_members")} } else { {t("call.hide_members")} }
+                    }
+                }
+                if focus.is_none() || !strip_hidden {
+                    div { class: "stage-grid",
+                        for feed in other_screens {
+                            VideoTile { key: "{feed.track_sid}", feed: feed.clone(), large: false }
+                        }
+                        for p in other_people {
+                            ParticipantTile {
+                                key: "{p.identity}",
+                                camera: cameras.iter().find(|f| f.participant == p.identity).cloned(),
+                                speaking: speakers.contains(&p.identity),
+                                participant: p,
+                                large: false,
+                            }
                         }
                     }
                 }
@@ -344,12 +391,21 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
 
 /// A participant: their camera if it's on, otherwise their avatar.
 #[component]
-fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking: bool) -> Element {
+fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking: bool, large: bool) -> Element {
     let state = use_context::<AppState>();
     let call_channel = state.call.read().as_ref().map(|c| c.channel);
     let id: Option<sivryn_client_core::protocol::UserId> = participant.identity.parse().ok();
-    let class = if speaking { "tile participant speaking" } else { "tile participant" };
+    let class = match (large, speaking) {
+        (true, true) => "tile participant large speaking",
+        (true, false) => "tile participant large",
+        (false, true) => "tile participant speaking",
+        (false, false) => "tile participant",
+    };
     let (identity, sharing) = (participant.identity.clone(), participant.sharing);
+    // The name on this server (nickname or display name).
+    let name = id
+        .map(|id| state.display_name_in(call_channel.and_then(|c| state.guild_of(c)), id))
+        .unwrap_or(participant.name.clone());
     let open_menu = move |e: MouseEvent| {
         let Some(user) = id else { return };
         let p = e.client_coordinates();
@@ -364,9 +420,11 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
         super::menu::open(state, p.x, p.y, items);
     };
 
+    let focus_key = Focus::User(participant.identity.clone());
     rsx! {
         div { class: "{class}",
-            onclick: open_menu.clone(),
+            // Left click shows this person large (again: back to the grid).
+            onclick: move |_| toggle_focus(state, focus_key.clone()),
             onmousedown: move |e| {
                 if super::menu::right_click(&e).is_some() {
                     open_menu(e);
@@ -376,7 +434,7 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
                 Some(feed) => rsx! { VideoCanvas { key: "{feed.track_sid}", feed } },
                 None => rsx! {
                     div { class: "tile-avatar",
-                        Avatar { name: participant.name.clone(), id, size: 76, speaking }
+                        Avatar { name: name.clone(), id, size: if large { 128 } else { 76 }, speaking }
                     }
                 },
             }
@@ -384,7 +442,7 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
                 if participant.muted {
                     span { class: "tag-muted", Svg { icon: Icon::MicOff, size: 13 } }
                 }
-                span { "{participant.name}" }
+                span { "{name}" }
                 if participant.sharing {
                     span { class: "live-badge", "LIVE" }
                 }
@@ -393,19 +451,35 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
     }
 }
 
+/// Shows a tile large, or goes back to the grid when it already is.
+fn toggle_focus(mut state: AppState, key: Focus) {
+    if let Some(c) = state.call.write().as_mut() {
+        let current = c.focus.clone().or_else(|| {
+            c.feeds
+                .iter()
+                .find(|f| f.source == TrackSource::Screenshare)
+                .filter(|_| c.auto_focus)
+                .map(|f| Focus::Screen(f.track_sid.clone()))
+        });
+        if current.as_ref() == Some(&key) {
+            c.focus = None;
+            c.auto_focus = false;
+        } else {
+            c.focus = Some(key);
+        }
+    }
+}
+
 #[component]
 fn VideoTile(feed: VideoFeed, large: bool) -> Element {
-    let mut state = use_context::<AppState>();
-    let name = feed.participant.parse().map(|id| state.username(id)).unwrap_or(feed.participant.clone());
+    let state = use_context::<AppState>();
+    let guild = state.call.read().as_ref().and_then(|c| state.guild_of(c.channel));
+    let name = feed.participant.parse().map(|id| state.display_name_in(guild, id)).unwrap_or(feed.participant.clone());
     let sid = feed.track_sid.clone();
     rsx! {
         div {
             class: if large { "tile screen large" } else { "tile screen" },
-            onclick: move |_| {
-                if let Some(c) = state.call.write().as_mut() {
-                    c.focus = Some(sid.clone());
-                }
-            },
+            onclick: move |_| toggle_focus(state, Focus::Screen(sid.clone())),
             VideoCanvas { feed }
             div { class: "name-tag",
                 Svg { icon: Icon::Monitor, size: 13 }
@@ -429,6 +503,11 @@ pub fn ScreenPicker() -> Element {
     let mut state = use_context::<AppState>();
     let services = use_context::<Services>();
     let sources = use_hook(list_sources);
+    // Live thumbnails while the picker is open (dropped with it).
+    let previews = use_hook({
+        let sources = sources.clone();
+        move || Rc::new(SourcePreviews::start(&sources))
+    });
     let video = state.settings.read().video.clone();
     let mut starting = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -442,7 +521,7 @@ pub fn ScreenPicker() -> Element {
         let Some(c) = state.call.cloned() else { return };
         let Some(room) = c.call.borrow().as_ref().map(|vc| vc.room.clone()) else { return };
         let video = state.settings.peek().video.clone();
-        let limits = video.screen_quality.apply(&c.join.screen_share);
+        let limits = video.screen_limits(&c.join.screen_share);
         let engine = services.engine.clone();
         starting.set(true);
         error.set(None);
@@ -485,18 +564,88 @@ pub fn ScreenPicker() -> Element {
         });
     });
 
-    let screens: Vec<ScreenSource> = sources.iter().filter(|s| s.kind == SourceKind::Screen).cloned().collect();
-    let windows: Vec<ScreenSource> = sources.iter().filter(|s| s.kind == SourceKind::Window).cloned().collect();
-    let quality_label = video.screen_quality.label();
+    let windows_tab = video.share_windows_tab;
+    let kind = if windows_tab { SourceKind::Window } else { SourceKind::Screen };
+    let shown: Vec<ScreenSource> = sources.iter().filter(|s| s.kind == kind).cloned().collect();
+    let quality_label = video.screen_label();
 
     rsx! {
         div { class: "overlay", onclick: move |_| state.modal.set(None),
-            div { class: "dialog wide", onclick: move |e| e.stop_propagation(),
+            div { class: "dialog share-dialog", onclick: move |e| e.stop_propagation(),
                 div { class: "dialog-header",
                     h2 { {t("share.title")} }
                     IconButton { icon: Icon::X, size: 18, onclick: move |_| state.modal.set(None) }
                 }
+                div { class: "share-tabs",
+                    div { class: if !windows_tab { "tab active" } else { "tab" },
+                        onclick: move |_| state.update_settings(|s| s.video.share_windows_tab = false),
+                        Svg { icon: Icon::Monitor, size: 16 }
+                        {t("share.screens")}
+                    }
+                    div { class: if windows_tab { "tab active" } else { "tab" },
+                        onclick: move |_| state.update_settings(|s| s.video.share_windows_tab = true),
+                        Svg { icon: Icon::Maximize, size: 16 }
+                        {t("share.windows")}
+                    }
+                }
+                div { class: "share-grid",
+                    if shown.is_empty() {
+                        div { class: "muted", {t("share.none")} }
+                    }
+                    for source in shown {
+                        {
+                            let thumb = previews.frames.get(&source.id).cloned();
+                            let s2 = source.clone();
+                            rsx! {
+                                div {
+                                    key: "{source.id}",
+                                    class: "share-card",
+                                    onclick: move |_| pick.call(s2.clone()),
+                                    div { class: "share-thumb",
+                                        if let Some(frames) = thumb {
+                                            FrameCanvas { frames: Frames(frames) }
+                                        }
+                                    }
+                                    div { class: "share-card-title",
+                                        if source.kind == SourceKind::Screen {
+                                            Svg { icon: Icon::Monitor, size: 14 }
+                                        } else {
+                                            Svg { icon: Icon::Maximize, size: 14 }
+                                        }
+                                        span { class: "source-title", "{source.title}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 div { class: "share-options",
+                    div { class: "share-option",
+                        span { class: "field-label", {t("share.resolution")} }
+                        div { class: "segmented",
+                            for r in ScreenResolution::ALL {
+                                div {
+                                    key: "{r:?}",
+                                    class: if video.screen_resolution == r { "seg active" } else { "seg" },
+                                    onclick: move |_| state.update_settings(|s| s.video.screen_resolution = r),
+                                    "{r.label()}"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "share-option",
+                        span { class: "field-label", {t("share.fps")} }
+                        div { class: "segmented",
+                            for fps in SCREEN_FPS {
+                                div {
+                                    key: "{fps}",
+                                    class: if video.screen_fps == fps { "seg active" } else { "seg" },
+                                    onclick: move |_| state.update_settings(|s| s.video.screen_fps = fps),
+                                    "{fps} FPS"
+                                }
+                            }
+                        }
+                    }
                     div { class: "share-option",
                         span { class: "field-label", {t("share.optimize")} }
                         div { class: "segmented",
@@ -512,52 +661,9 @@ pub fn ScreenPicker() -> Element {
                             }
                         }
                     }
-                    div { class: "share-option",
-                        span { class: "field-label", {t("share.quality")} }
-                        div { class: "segmented",
-                            for q in ScreenQuality::ALL {
-                                div {
-                                    key: "{q:?}",
-                                    class: if video.screen_quality == q { "seg active" } else { "seg" },
-                                    onclick: move |_| state.update_settings(|s| s.video.screen_quality = q),
-                                    "{q.label()}"
-                                }
-                            }
-                        }
-                    }
                     div { class: "share-option inline",
                         Toggle { on: video.screen_audio, onchange: move |v| state.update_settings(|s| s.video.screen_audio = v) }
                         span { {t("share.audio")} }
-                    }
-                }
-                div { class: "source-section", {t("share.screens")} }
-                div { class: "sources",
-                    for source in screens {
-                        div {
-                            key: "{source.id}",
-                            class: "source-card",
-                            onclick: {
-                                let source = source.clone();
-                                move |_| pick.call(source.clone())
-                            },
-                            div { class: "source-icon", Svg { icon: Icon::Monitor, size: 26 } }
-                            span { class: "source-title", "{source.title}" }
-                        }
-                    }
-                }
-                div { class: "source-section", {t("share.windows")} }
-                div { class: "sources list",
-                    for source in windows {
-                        div {
-                            key: "{source.id}",
-                            class: "source-row",
-                            onclick: {
-                                let source = source.clone();
-                                move |_| pick.call(source.clone())
-                            },
-                            Svg { icon: Icon::Maximize, size: 16 }
-                            span { class: "source-title", "{source.title}" }
-                        }
                     }
                 }
                 if *starting.read() {

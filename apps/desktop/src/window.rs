@@ -19,6 +19,26 @@ pub async fn style_title_bar(dark: bool) {
     let _ = dark;
 }
 
+/// Whether Sivryn's window has the keyboard focus right now.
+pub fn is_focused() -> bool {
+    #[cfg(windows)]
+    return imp::is_focused();
+    #[cfg(not(windows))]
+    true
+}
+
+/// Flashes the taskbar button until the window gets focus.
+pub fn flash() {
+    #[cfg(windows)]
+    imp::flash();
+}
+
+/// Brings the window to the front (e.g. after clicking a notification).
+pub fn bring_to_front() {
+    #[cfg(windows)]
+    imp::bring_to_front();
+}
+
 /// The window's inner size in CSS pixels, e.g. to keep menus on screen.
 pub fn client_size() -> Option<(f64, f64)> {
     #[cfg(windows)]
@@ -62,6 +82,47 @@ mod imp {
         // SAFETY: the callback only runs during this call.
         let _ = unsafe { EnumWindows(Some(collect), LPARAM(&raw mut windows as isize)) };
         windows
+    }
+
+    pub fn is_focused() -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        // SAFETY: plain window queries.
+        unsafe {
+            let fg = GetForegroundWindow();
+            let mut pid = 0;
+            GetWindowThreadProcessId(fg, Some(&mut pid));
+            pid == std::process::id()
+        }
+    }
+
+    pub fn flash() {
+        use windows::Win32::UI::WindowsAndMessaging::{FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx};
+        for hwnd in own_windows() {
+            let info = FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            };
+            // SAFETY: a correctly sized struct for our own window.
+            unsafe {
+                let _ = FlashWindowEx(&info);
+            }
+        }
+    }
+
+    pub fn bring_to_front() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+        if let Some(hwnd) = own_windows().into_iter().next() {
+            // SAFETY: plain calls on our own window.
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
     }
 
     pub fn client_size() -> Option<(f64, f64)> {

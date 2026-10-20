@@ -9,6 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+chrono.workspace = true
 sivryn-protocol.workspace = true
 
 tokio.workspace = true

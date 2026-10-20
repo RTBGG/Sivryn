@@ -31,7 +31,7 @@ pub enum SourceKind {
     Window,
 }
 
-fn capturer(kind: SourceKind) -> Option<DesktopCapturer> {
+pub(crate) fn capturer(kind: SourceKind) -> Option<DesktopCapturer> {
     let source_type = match kind {
         SourceKind::Screen => DesktopCaptureSourceType::Screen,
         SourceKind::Window => DesktopCaptureSourceType::Window,

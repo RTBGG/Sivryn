@@ -10,6 +10,7 @@ mod files;
 mod hotkeys;
 mod i18n;
 mod messages;
+mod notify;
 mod preview;
 mod session;
 mod settings;
@@ -30,6 +31,7 @@ fn main() {
         .init();
     install_crash_log();
     sivryn_client_core::install_crypto_provider();
+    ui::register_fonts();
 
     let window = WindowAttributes::default()
         .with_title("Sivryn")

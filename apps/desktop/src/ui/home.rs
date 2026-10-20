@@ -8,7 +8,7 @@ use sivryn_client_core::protocol::model::{ChannelKind, User};
 use sivryn_client_core::protocol::{ChannelId, UserId};
 
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, IconButton};
+use super::widgets::{Avatar, IconButton, StatusDot};
 use super::{AppState, Modal, menu};
 use crate::i18n::t;
 
@@ -22,7 +22,6 @@ pub fn HomeSidebar() -> Element {
     let mut state = use_context::<AppState>();
     let selected = *state.channel.read();
     let incoming = state.friends.read().incoming.len();
-    let unread = state.unread.read().clone();
     let me = state.me();
     let dms = state.dms.read().clone();
 
@@ -52,9 +51,10 @@ pub fn HomeSidebar() -> Element {
                     let title = state.dm_title(&dm);
                     let group = dm.channel.kind == ChannelKind::Group;
                     let partner = dm.members.iter().find(|u| Some(u.id) != me).map(|u| u.id);
-                    let online = partner.is_some_and(|p| state.online.read().contains(&p));
+                    let status = partner.and_then(|p| state.status_of(p));
                     let count = dm.members.len();
-                    let is_unread = unread.contains(&id) && selected != Some(id);
+                    let unread = if selected == Some(id) { 0 } else { state.unread_count(id) };
+                    let is_unread = unread > 0;
                     rsx! {
                         div {
                             key: "{id}",
@@ -75,7 +75,7 @@ pub fn HomeSidebar() -> Element {
                                     div { class: "group-avatar", Svg { icon: Icon::Users, size: 18 } }
                                 } else {
                                     Avatar { name: title.clone(), id: partner, size: 32 }
-                                    div { class: if online { "presence-dot online" } else { "presence-dot" } }
+                                    StatusDot { status }
                                 }
                             }
                             div { class: "dm-text",
@@ -85,7 +85,7 @@ pub fn HomeSidebar() -> Element {
                                 }
                             }
                             if is_unread {
-                                div { class: "unread-dot" }
+                                span { class: "count-badge", "{unread}" }
                             }
                             div {
                                 class: "dm-close",
@@ -121,7 +121,13 @@ pub fn FriendsPage() -> Element {
     let state = use_context::<AppState>();
     let mut tab = use_signal(|| Tab::Online);
     let friends = state.friends.read().clone();
-    let online = state.online.read().clone();
+    let online: std::collections::HashSet<UserId> = state
+        .online
+        .read()
+        .iter()
+        .filter(|(_, s)| **s != sivryn_client_core::protocol::model::UserStatus::Invisible)
+        .map(|(id, _)| *id)
+        .collect();
     let pending = friends.incoming.len() + friends.outgoing.len();
     let current = *tab.read();
     let tab_class = move |t: Tab| if current == t { "tab active" } else { "tab" };
@@ -208,10 +214,12 @@ fn FriendRow(user: User, kind: RowKind) -> Element {
     let state = use_context::<AppState>();
     let name = display_name(&user);
     let id = user.id;
-    let online = state.online.read().contains(&id);
+    let presence = state.status_of(id);
     let status = match kind {
-        RowKind::Friend if online => t("shell.online"),
-        RowKind::Friend => t("shell.offline_short"),
+        RowKind::Friend => match presence {
+            Some(p) => super::shell::status_label(p),
+            None => t("shell.offline_short"),
+        },
         RowKind::Incoming => t("friends.incoming_hint"),
         RowKind::Outgoing => t("friends.outgoing_hint"),
         RowKind::Blocked => t("friends.blocked_hint"),
@@ -233,7 +241,7 @@ fn FriendRow(user: User, kind: RowKind) -> Element {
             div { class: "member-avatar",
                 Avatar { name: name.clone(), id: Some(id), size: 36 }
                 if kind == RowKind::Friend {
-                    div { class: if online { "presence-dot online" } else { "presence-dot" } }
+                    StatusDot { status: presence }
                 }
             }
             div { class: "friend-text",

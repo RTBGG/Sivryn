@@ -63,6 +63,9 @@ pub struct View<Rend: WindowRenderer> {
     pub mouse_pos: (f32, f32),
     pub animation_timer: Option<Instant>,
     pub is_visible: bool,
+    /// Sivryn patch: animated wheel scrolling and middle-click autoscroll.
+    smooth_scroll: crate::scrolling::Smooth,
+    autoscroll: Option<crate::scrolling::Autoscroll>,
 
     #[cfg(feature = "accessibility")]
     /// Accessibility adapter for `accesskit`.
@@ -114,6 +117,8 @@ impl<Rend: WindowRenderer> View<Rend> {
             buttons: MouseEventButtons::None,
             mouse_pos: Default::default(),
             is_visible: winit_window.is_visible().unwrap_or(true),
+            smooth_scroll: Default::default(),
+            autoscroll: None,
             #[cfg(feature = "accessibility")]
             accessibility: AccessibilityState::new(&winit_window, proxy.clone()),
         }
@@ -216,7 +221,39 @@ impl<Rend: WindowRenderer> View<Rend> {
         }
     }
 
+    /// Sivryn patch: applies pending wheel and autoscroll movement.
+    fn apply_scrolling(&mut self) -> bool {
+        let mut active = false;
+        if let Some((node, dx, dy)) = self.smooth_scroll.step() {
+            self.scroll(node, dx, dy);
+            active |= self.smooth_scroll.is_active();
+        }
+        if let Some(auto) = self.autoscroll.as_mut() {
+            let dy = auto.step(self.mouse_pos);
+            let node = auto.node;
+            if dy != 0.0 {
+                self.scroll(node, 0.0, dy);
+            }
+            active = true;
+        }
+        active
+    }
+
+    fn scroll(&mut self, node: Option<usize>, dx: f64, dy: f64) {
+        match node {
+            Some(node) => self.doc.scroll_node_by(node, dx, dy),
+            None => self.doc.scroll_viewport_by(dx, dy),
+        }
+    }
+
+    fn stop_autoscroll(&mut self) {
+        if self.autoscroll.take().is_some() {
+            self.window.set_cursor(winit::window::CursorIcon::Default);
+        }
+    }
+
     pub fn redraw(&mut self) {
+        let scrolling = self.apply_scrolling();
         let animation_time = self.current_animation_time();
         self.doc.resolve(animation_time);
         let (width, height) = self.doc.viewport().window_size;
@@ -224,7 +261,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         self.renderer
             .render(|scene| paint_scene(scene, &self.doc, scale, width, height));
 
-        if self.is_visible && self.doc.is_animating() {
+        if self.is_visible && (self.doc.is_animating() || scrolling) {
             self.request_redraw();
         }
     }
@@ -297,6 +334,12 @@ impl<Rend: WindowRenderer> View<Rend> {
                     return;
                 };
 
+                // Sivryn patch: Escape goes to the app first (see escape.rs).
+                if event.state.is_pressed() && key_code == KeyCode::Escape && crate::escape::escape() {
+                    self.request_redraw();
+                    return;
+                }
+
                 if event.state.is_pressed() {
                     let ctrl = self.keyboard_modifiers.state().control_key();
                     let meta = self.keyboard_modifiers.state().super_key();
@@ -357,6 +400,27 @@ impl<Rend: WindowRenderer> View<Rend> {
                     mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
                 });
                 self.doc.handle_ui_event(event);
+                // Sivryn patch: keep the autoscroll cursor while moving.
+                if self.autoscroll.is_some() {
+                    self.window.set_cursor(winit::window::CursorIcon::AllScroll);
+                }
+            }
+            // Sivryn patch: middle-click autoscroll (see scrolling.rs).
+            WindowEvent::MouseInput { button: MouseButton::Middle, state, .. } => {
+                match state {
+                    ElementState::Pressed if self.autoscroll.is_some() => self.stop_autoscroll(),
+                    ElementState::Pressed => {
+                        let node = self.doc.get_hover_node_id();
+                        self.autoscroll = Some(crate::scrolling::Autoscroll::new(self.mouse_pos, node));
+                        self.window.set_cursor(winit::window::CursorIcon::AllScroll);
+                        self.request_redraw();
+                    }
+                    ElementState::Released => {
+                        if self.autoscroll.as_ref().is_some_and(|a| a.ends_on_release(self.mouse_pos)) {
+                            self.stop_autoscroll();
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 let button = match button {
@@ -364,6 +428,13 @@ impl<Rend: WindowRenderer> View<Rend> {
                     MouseButton::Right => MouseEventButton::Secondary,
                     _ => return,
                 };
+                // Sivryn patch: a click ends autoscroll and does nothing else.
+                if self.autoscroll.is_some() {
+                    if state == ElementState::Pressed {
+                        self.stop_autoscroll();
+                    }
+                    return;
+                }
 
                 match state {
                     ElementState::Pressed => self.buttons |= button.into(),
@@ -385,20 +456,38 @@ impl<Rend: WindowRenderer> View<Rend> {
                 self.doc.handle_ui_event(event);
                 self.request_redraw();
             }
+            // Sivryn patch: browser-like wheel scrolling and Ctrl+wheel for the
+            // app (see scrolling.rs).
             WindowEvent::MouseWheel { delta, .. } => {
-                let (scroll_x, scroll_y)= match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x as f64 * 20.0, y as f64 * 20.0),
-                    winit::event::MouseScrollDelta::PixelDelta(offsets) => (offsets.x, offsets.y)
+                if self.autoscroll.is_some() {
+                    self.stop_autoscroll();
+                }
+                let notches = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y / crate::scrolling::NOTCH,
                 };
-
-                let has_changed = if let Some(hover_node_id) = self.doc.get_hover_node_id() {
-                    self.doc.scroll_node_by_has_changed(hover_node_id, scroll_x, scroll_y)
-                } else {
-                    self.doc.scroll_viewport_by_has_changed(scroll_x, scroll_y)
-                };
-
-                if has_changed {
+                if self.keyboard_modifiers.state().control_key() && crate::scrolling::ctrl_wheel(notches) {
                     self.request_redraw();
+                    return;
+                }
+                match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                        let node = self.doc.get_hover_node_id();
+                        let notch = crate::scrolling::NOTCH;
+                        self.smooth_scroll.add(node, x as f64 * notch, y as f64 * notch);
+                        self.request_redraw();
+                    }
+                    // Touchpads already deliver smooth pixel deltas.
+                    winit::event::MouseScrollDelta::PixelDelta(offsets) => {
+                        let has_changed = if let Some(hover_node_id) = self.doc.get_hover_node_id() {
+                            self.doc.scroll_node_by_has_changed(hover_node_id, offsets.x, offsets.y)
+                        } else {
+                            self.doc.scroll_viewport_by_has_changed(offsets.x, offsets.y)
+                        };
+                        if has_changed {
+                            self.request_redraw();
+                        }
+                    }
                 }
             }
 

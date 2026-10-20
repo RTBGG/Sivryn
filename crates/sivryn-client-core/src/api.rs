@@ -1,9 +1,10 @@
+use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sivryn_protocol::api::*;
-use sivryn_protocol::model::{Channel, Guild, Message, User};
-use sivryn_protocol::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
+use sivryn_protocol::model::{Category, Channel, Guild, Message, NotifyLevel, User};
+use sivryn_protocol::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -18,6 +19,11 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// The thing asked for doesn't exist (any more).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, ClientError::Api { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
+
     /// The session token was rejected (expired or logged out elsewhere).
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, ClientError::Api { status, .. } if *status == StatusCode::UNAUTHORIZED)
@@ -154,11 +160,22 @@ impl ApiClient {
         self.get("/guilds").await
     }
 
-    pub async fn create_guild(&self, name: &str) -> Result<GuildWithChannels, ClientError> {
-        self.post("/guilds", &CreateGuildRequest { name: name.into() }).await
+    /// Creates a guild; the category names are in the creator's language.
+    pub async fn create_guild(
+        &self,
+        name: &str,
+        text_category: &str,
+        voice_category: &str,
+    ) -> Result<GuildWithChannels, ClientError> {
+        let req = CreateGuildRequest {
+            name: name.into(),
+            text_category: Some(text_category.into()),
+            voice_category: Some(voice_category.into()),
+        };
+        self.post("/guilds", &req).await
     }
 
-    pub async fn members(&self, guild: GuildId) -> Result<Vec<User>, ClientError> {
+    pub async fn members(&self, guild: GuildId) -> Result<Vec<GuildMember>, ClientError> {
         self.get(&format!("/guilds/{guild}/members")).await
     }
 
@@ -246,7 +263,7 @@ impl ApiClient {
     }
 
     /// Users you can see who are online right now.
-    pub async fn presence(&self) -> Result<Vec<UserId>, ClientError> {
+    pub async fn presence(&self) -> Result<Vec<UserPresence>, ClientError> {
         self.get("/presence").await
     }
 
@@ -369,6 +386,79 @@ impl ApiClient {
 
     pub async fn channel_voice_state(&self, channel: ChannelId) -> Result<VoiceChannelState, ClientError> {
         self.get(&format!("/channels/{channel}/voice")).await
+    }
+
+    /// Deletes a guild (owner only).
+    pub async fn delete_guild(&self, guild: GuildId) -> Result<(), ClientError> {
+        self.delete(&format!("/guilds/{guild}")).await
+    }
+
+    pub async fn update_channel(&self, channel: ChannelId, req: &UpdateChannelRequest) -> Result<Channel, ClientError> {
+        self.patch(&format!("/channels/{channel}"), req).await
+    }
+
+    pub async fn delete_channel(&self, channel: ChannelId) -> Result<(), ClientError> {
+        self.delete(&format!("/channels/{channel}")).await
+    }
+
+    pub async fn create_category(&self, guild: GuildId, name: &str) -> Result<Category, ClientError> {
+        self.post(&format!("/guilds/{guild}/categories"), &CategoryRequest { name: name.into() }).await
+    }
+
+    pub async fn rename_category(&self, category: CategoryId, name: &str) -> Result<(), ClientError> {
+        self.patch(&format!("/categories/{category}"), &CategoryRequest { name: name.into() }).await
+    }
+
+    pub async fn delete_category(&self, category: CategoryId) -> Result<(), ClientError> {
+        self.delete(&format!("/categories/{category}")).await
+    }
+
+    /// Your name (`Some(None)` clears it) or notification level in a guild.
+    pub async fn update_my_member(
+        &self,
+        guild: GuildId,
+        nick: Option<Option<String>>,
+        notify_level: Option<NotifyLevel>,
+    ) -> Result<(), ClientError> {
+        self.patch(&format!("/guilds/{guild}/members/@me"), &UpdateMemberRequest { nick, notify_level }).await
+    }
+
+    pub async fn read_states(&self) -> Result<Vec<ReadState>, ClientError> {
+        self.get("/users/@me/read-states").await
+    }
+
+    /// Marks a channel read up to `message`.
+    pub async fn ack(&self, channel: ChannelId, message: MessageId) -> Result<(), ClientError> {
+        self.put(&format!("/channels/{channel}/read"), &AckRequest { message_id: message }).await
+    }
+
+    pub async fn mutes(&self) -> Result<Vec<ChannelMute>, ClientError> {
+        self.get("/users/@me/mutes").await
+    }
+
+    /// Mutes a channel until `until`, or until unmuted.
+    pub async fn mute(&self, channel: ChannelId, until: Option<DateTime<Utc>>) -> Result<(), ClientError> {
+        self.put(&format!("/channels/{channel}/mute"), &MuteRequest { until }).await
+    }
+
+    pub async fn unmute(&self, channel: ChannelId) -> Result<(), ClientError> {
+        self.delete(&format!("/channels/{channel}/mute")).await
+    }
+
+    /// Sets the profile picture (`banner: false`) or banner. Body: the image.
+    pub async fn set_profile_image(
+        &self,
+        banner: bool,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<UploadedFile, ClientError> {
+        let path = if banner { "/users/@me/banner" } else { "/users/@me/avatar" };
+        let req = self.authed(Method::PUT, path)?.header("content-type", content_type).body(bytes);
+        Self::finish(req).await
+    }
+
+    pub async fn remove_profile_image(&self, banner: bool) -> Result<(), ClientError> {
+        self.delete(if banner { "/users/@me/banner" } else { "/users/@me/avatar" }).await
     }
 
     /// Disconnects someone from a guild voice channel (needs `MOVE_MEMBERS`).

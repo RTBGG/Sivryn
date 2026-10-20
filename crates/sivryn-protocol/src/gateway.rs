@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::MlsWelcome;
-use crate::model::{Channel, Guild, Message, User};
+use crate::model::{Channel, Guild, Message, User, UserStatus};
 use crate::{ChannelId, DeviceId, GuildId, MessageId, UserId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,10 +92,28 @@ pub enum Event {
     },
     /// Friends, requests or blocks changed; refetch `GET /friends`.
     RelationshipsChanged,
+    /// `status: None` means offline (or invisible).
     PresenceUpdate {
         user_id: UserId,
-        online: bool,
+        status: Option<UserStatus>,
     },
+    /// A user changed their name or profile picture.
+    UserUpdate {
+        user: User,
+    },
+    /// A member changed their name in a guild.
+    MemberUpdate {
+        guild_id: GuildId,
+        user_id: UserId,
+        nick: Option<String>,
+    },
+    /// Another of your devices read a channel up to here.
+    ReadStateUpdate {
+        channel_id: ChannelId,
+        last_read_id: MessageId,
+    },
+    /// Your mutes or notification levels changed on another device.
+    NotificationSettingsChanged,
 }
 
 /// Who receives an event.
@@ -129,11 +147,11 @@ mod tests {
 
     #[test]
     fn event_round_trip() {
-        let ev = Event::PresenceUpdate { user_id: UserId::new(), online: true };
+        let ev = Event::PresenceUpdate { user_id: UserId::new(), status: Some(UserStatus::Idle) };
         let json = serde_json::to_string(&ServerMessage::Event(ev)).unwrap();
         assert!(json.contains(r#""op":"event""#));
         assert!(json.contains(r#""t":"presence_update""#));
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ServerMessage::Event(Event::PresenceUpdate { online: true, .. })));
+        assert!(matches!(back, ServerMessage::Event(Event::PresenceUpdate { status: Some(UserStatus::Idle), .. })));
     }
 }

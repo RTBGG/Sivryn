@@ -71,6 +71,8 @@ id_type!(
     InviteId,
     /// A device of a user; each device has its own MLS identity.
     DeviceId,
-    /// An uploaded file: an (encrypted) attachment or a guild icon.
+    /// An uploaded file: an (encrypted) attachment, a guild icon or an avatar.
     FileId,
+    /// A channel category inside a guild.
+    CategoryId,
 );

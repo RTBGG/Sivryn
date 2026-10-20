@@ -27,7 +27,7 @@ pub fn ChatView(channel: ChannelId) -> Element {
     // and fetch anything newer.
     use_effect(use_reactive!(|channel| {
         let Some(s) = state.session.cloned() else { return };
-        state.unread.write().remove(&channel);
+        state.mark_read(channel);
         if !state.messages.peek().contains_key(&channel) {
             let stored = fold(&chat::history(&s, channel));
             state.messages.write().insert(channel, stored);
@@ -59,7 +59,8 @@ pub fn ChatView(channel: ChannelId) -> Element {
     let icon = match kind {
         ChannelKind::Dm => Icon::AtSign,
         ChannelKind::Group => Icon::Users,
-        _ => Icon::Hash,
+        ChannelKind::Voice => Icon::Volume,
+        ChannelKind::Text => Icon::Hash,
     };
     let dm_partner = (kind == ChannelKind::Dm)
         .then(|| state.dm(channel).and_then(|d| d.members.iter().find(|u| Some(u.id) != me).map(|u| u.id)))
@@ -79,15 +80,17 @@ pub fn ChatView(channel: ChannelId) -> Element {
                     "{name}"
                 }
                 if let Some(partner) = dm_partner {
-                    if state.online.read().contains(&partner) {
-                        span { class: "status-dot online" }
-                    }
+                    super::widgets::StatusDot { status: state.status_of(partner), class: "inline" }
                 }
                 span { class: "e2ee-badge", title: t("chat.e2ee_hint"),
                     Svg { icon: Icon::ShieldCheck, size: 14 }
                     {t("chat.e2ee")}
                 }
                 span { class: "topbar-spacer" }
+                // A voice channel's chat: back to the call (or join it).
+                if kind == ChannelKind::Voice {
+                    IconButton { icon: Icon::Phone, size: 18, title: t("channels.back_to_call"), onclick: move |_| state.voice_chat.set(false) }
+                }
                 if kind.is_private() {
                     IconButton { icon: Icon::Phone, size: 18, title: t("call.start"), onclick: move |_| call::start(state, channel, false) }
                     IconButton { icon: Icon::Video, size: 18, title: t("call.start_video"), onclick: move |_| call::start(state, channel, true) }
@@ -169,6 +172,13 @@ fn ChannelIntro(kind: ChannelKind, name: String, partner: Option<UserId>) -> Ele
                 p { class: "muted", {t("chat.group_start")} }
             }
         },
+        ChannelKind::Voice => rsx! {
+            div { class: "channel-intro",
+                div { class: "intro-icon", Svg { icon: Icon::Volume, size: 32 } }
+                h2 { "{t(\"chat.welcome\")} {name}" }
+                p { class: "muted", {t("chat.voice_chat_hint")} }
+            }
+        },
         _ => rsx! {
             div { class: "channel-intro",
                 div { class: "intro-icon", Svg { icon: Icon::Hash, size: 32 } }
@@ -216,7 +226,8 @@ fn MessageView(
     compact: bool,
 ) -> Element {
     let state = use_context::<AppState>();
-    let author = state.username(msg.author);
+    let guild = state.guild_of(channel);
+    let author = state.display_name_in(guild, msg.author);
     let time = time_label(msg.created_at);
     let me = state.me();
     let mine = Some(msg.author) == me;
@@ -272,7 +283,7 @@ fn MessageView(
         }
     };
     let reply_line = reply.map(|(user, text)| {
-        let name = user.map(|u| state.username(u)).unwrap_or_default();
+        let name = user.map(|u| state.display_name_in(guild, u)).unwrap_or_default();
         rsx! {
             div { class: "msg-reply",
                 div { class: "reply-spine" }
@@ -629,7 +640,7 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
             .read()
             .get(&channel)
             .and_then(|l| l.iter().find(|m| m.id == id))
-            .map(|m| state.username(m.author))
+            .map(|m| state.display_name_in(state.guild_of(channel), m.author))
     });
     let drag = *state.drag_over.read();
     let mut cancel = move || {

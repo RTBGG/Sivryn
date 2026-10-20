@@ -4,7 +4,7 @@ use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
 use sivryn_client_core::protocol::GuildId;
 use sivryn_client_core::protocol::api::{Ban, UpdateGuildRequest};
-use sivryn_client_core::protocol::model::{AFK_TIMEOUTS, ChannelKind};
+use sivryn_client_core::protocol::model::{AFK_TIMEOUTS, AUDIO_BITRATES, ChannelKind};
 use sivryn_client_core::protocol::permissions::Permissions;
 
 use super::AppState;
@@ -155,6 +155,71 @@ fn Overview(guild: GuildId) -> Element {
                         update(UpdateGuildRequest { afk_timeout_minutes: Some(m), ..Default::default() });
                     }
                 },
+            }
+        }
+        div { class: "field",
+            div { class: "field-label", {t("guild.audio_bitrate")} }
+            Select {
+                value: g.audio_bitrate.to_string(),
+                options: AUDIO_BITRATES.iter().map(|b| opt(b.to_string(), format!("{} kbit/s", b / 1000))).collect(),
+                onchange: move |v: String| {
+                    if let Ok(b) = v.parse() {
+                        update(UpdateGuildRequest { audio_bitrate: Some(b), ..Default::default() });
+                    }
+                },
+            }
+            div { class: "hint", {t("guild.audio_bitrate_hint")} }
+        }
+        if Some(g.owner_id) == state.me() {
+            div { class: "divider" }
+            DeleteGuild { guild, name: g.name.clone() }
+        }
+    }
+}
+
+/// Deleting the server, after typing its name.
+#[component]
+fn DeleteGuild(guild: GuildId, name: String) -> Element {
+    let mut state = use_context::<AppState>();
+    let mut typed = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let matches = typed.read().trim() == name.trim();
+    let delete = move |_| {
+        let Some(s) = state.session.cloned() else { return };
+        if !matches || *busy.peek() {
+            return;
+        }
+        busy.set(true);
+        spawn_forever(async move {
+            match s.api.delete_guild(guild).await {
+                Ok(()) => {
+                    state.modal.set(None);
+                    state.guild.set(None);
+                    state.channel.set(None);
+                    state.home.set(true);
+                    state.report(state.refresh().await);
+                }
+                Err(e) => {
+                    busy.set(false);
+                    state.report(Err(e.to_string()));
+                }
+            }
+        });
+    };
+    rsx! {
+        div { class: "danger-zone",
+            h2 { class: "subsection", {t("guild.delete")} }
+            p { class: "muted small", {t("guild.delete_hint")} }
+            div { class: "row",
+                input {
+                    class: "input",
+                    value: "{typed}",
+                    placeholder: "{name}",
+                    oninput: move |e| typed.set(e.value()),
+                }
+                button { class: if matches && !*busy.read() { "button danger" } else { "button danger busy" }, onclick: delete,
+                    {t("guild.delete_action")}
+                }
             }
         }
     }

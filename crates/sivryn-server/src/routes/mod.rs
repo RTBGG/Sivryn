@@ -12,7 +12,7 @@ mod guilds;
 mod instance;
 mod messages;
 mod mls;
-mod users;
+pub(crate) mod users;
 pub(crate) mod voice;
 
 /// Slack on top of the file size limit for request framing.
@@ -29,6 +29,20 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
         .route("/auth/oidc/start", get(auth::oidc_start))
         .route("/users/@me", get(auth::me).patch(users::update_me))
         .route("/users/@me/settings", get(users::settings))
+        .route(
+            "/users/@me/avatar",
+            put(users::set_avatar)
+                .delete(users::remove_avatar)
+                .layer(DefaultBodyLimit::max(4 * 1024 * 1024 + UPLOAD_OVERHEAD)),
+        )
+        .route(
+            "/users/@me/banner",
+            put(users::set_banner)
+                .delete(users::remove_banner)
+                .layer(DefaultBodyLimit::max(4 * 1024 * 1024 + UPLOAD_OVERHEAD)),
+        )
+        .route("/users/@me/read-states", get(users::read_states))
+        .route("/users/@me/mutes", get(users::mutes))
         .route("/users/{user_id}", get(users::profile))
         .route("/presence", get(users::presence))
         .route("/friends", get(friends::list))
@@ -42,7 +56,13 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
         .route("/dms/{channel_id}/members", post(dms::add_member))
         .route("/dms/{channel_id}/members/@me", delete(dms::leave))
         .route("/guilds", get(guilds::list).post(guilds::create))
-        .route("/guilds/{guild_id}", get(guilds::get).patch(guilds::update))
+        .route("/guilds/{guild_id}", get(guilds::get).patch(guilds::update).delete(guilds::delete))
+        .route("/guilds/{guild_id}/categories", post(guilds::create_category))
+        .route(
+            "/categories/{category_id}",
+            axum::routing::patch(guilds::update_category).delete(guilds::delete_category),
+        )
+        .route("/guilds/{guild_id}/members/@me", axum::routing::patch(guilds::update_me_member))
         .route(
             "/guilds/{guild_id}/icon",
             put(guilds::set_icon).layer(DefaultBodyLimit::max(4 * 1024 * 1024 + UPLOAD_OVERHEAD)),
@@ -55,6 +75,9 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
         .route("/guilds/{guild_id}/channels", post(guilds::create_channel))
         .route("/guilds/{guild_id}/invites", post(guilds::create_invite))
         .route("/invites/{code}", post(guilds::accept_invite))
+        .route("/channels/{channel_id}", axum::routing::patch(guilds::update_channel).delete(guilds::delete_channel))
+        .route("/channels/{channel_id}/read", put(users::ack))
+        .route("/channels/{channel_id}/mute", put(users::mute).delete(users::unmute))
         .route("/channels/{channel_id}/members", get(guilds::channel_members))
         .route("/channels/{channel_id}/messages", get(messages::list).post(messages::send))
         .route("/channels/{channel_id}/messages/{message_id}", delete(messages::delete))

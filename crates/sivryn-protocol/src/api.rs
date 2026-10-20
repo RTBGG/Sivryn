@@ -3,9 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::media::{CameraLimits, ScreenShareLimits};
-use crate::model::{Channel, ChannelKind, Guild, Message, MessageKind, User};
+use chrono::{DateTime, Utc};
+
+use crate::model::{Category, Channel, ChannelKind, Guild, Message, MessageKind, NotifyLevel, User, UserStatus};
 use crate::permissions::Permissions;
-use crate::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
+use crate::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorBody {
@@ -54,6 +56,11 @@ pub struct SessionResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateGuildRequest {
     pub name: String,
+    /// Names for the default categories, in the creator's language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_category: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,15 +69,98 @@ pub struct CreateChannelRequest {
     pub kind: ChannelKind,
     #[serde(default)]
     pub e2ee: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<CategoryId>,
 }
 
+/// `PATCH /api/v1/channels/{id}`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateChannelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `Some(None)` moves the channel out of its category.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub category_id: Option<Option<CategoryId>>,
+}
+
+/// `POST /api/v1/guilds/{id}/categories` and `PATCH /api/v1/categories/{id}`
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CategoryRequest {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GuildWithChannels {
     pub guild: Guild,
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub categories: Vec<Category>,
     /// The requesting user's permissions in this guild.
     #[serde(default = "Permissions::empty")]
     pub permissions: Permissions,
+    /// The requesting user's name in this guild, if set.
+    #[serde(default)]
+    pub nick: Option<String>,
+    /// Which messages here notify the requesting user.
+    #[serde(default)]
+    pub notify_level: NotifyLevel,
+}
+
+/// `GET /api/v1/guilds/{id}/members`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GuildMember {
+    pub user: User,
+    /// Name in this guild, overriding the display name.
+    #[serde(default)]
+    pub nick: Option<String>,
+}
+
+/// `PATCH /api/v1/guilds/{id}/members/@me`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateMemberRequest {
+    /// `Some(None)` clears the name in this guild.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub nick: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_level: Option<NotifyLevel>,
+}
+
+/// `GET /api/v1/users/@me/read-states`: how far each channel has been read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadState {
+    pub channel_id: ChannelId,
+    pub last_read_id: Option<MessageId>,
+    /// Messages from others since then (capped at 100).
+    pub unread: u32,
+}
+
+/// `PUT /api/v1/channels/{id}/read`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AckRequest {
+    pub message_id: MessageId,
+}
+
+/// `GET /api/v1/users/@me/mutes`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelMute {
+    pub channel_id: ChannelId,
+    /// `None`: until unmuted.
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// `PUT /api/v1/channels/{id}/mute`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MuteRequest {
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// `GET /api/v1/presence`: status of online users you know (friends, guild
+/// and DM members). Missing means offline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserPresence {
+    pub user_id: UserId,
+    pub status: UserStatus,
 }
 
 /// `POST /api/v1/channels/{id}/messages`: send an MLS-encrypted message.
@@ -179,6 +269,9 @@ pub struct VoiceJoinResponse {
     pub screen_share: ScreenShareLimits,
     pub camera: CameraLimits,
     pub e2ee: bool,
+    /// Microphone bitrate (bits per second) set by the guild.
+    #[serde(default = "crate::model::default_audio_bitrate")]
+    pub audio_bitrate: u32,
 }
 
 // --- Voice presence ---------------------------------------------------------
@@ -221,6 +314,13 @@ pub struct UserProfile {
     pub user: User,
     pub relationship: Relationship,
     pub mutual_guilds: Vec<GuildId>,
+    #[serde(default)]
+    pub bio: String,
+    #[serde(default)]
+    pub banner_id: Option<FileId>,
+    /// `None` while offline (or invisible).
+    #[serde(default)]
+    pub status: Option<UserStatus>,
 }
 
 /// `GET /api/v1/friends`
@@ -243,12 +343,25 @@ pub struct FriendRequest {
 pub struct UpdateMeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_server_dms: Option<bool>,
+    /// `Some(None)` goes back to showing the account name.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub display_name: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<UserStatus>,
 }
 
 /// `GET /api/v1/users/@me/settings`
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeSettings {
     pub allow_server_dms: bool,
+    #[serde(default)]
+    pub status: UserStatus,
+    #[serde(default)]
+    pub bio: String,
+    #[serde(default)]
+    pub banner_id: Option<FileId>,
 }
 
 // --- Direct and group messages ------------------------------------------------
@@ -291,6 +404,9 @@ pub struct UpdateGuildRequest {
     pub afk_channel_id: Option<Option<ChannelId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub afk_timeout_minutes: Option<u32>,
+    /// One of [`crate::model::AUDIO_BITRATES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_bitrate: Option<u32>,
 }
 
 mod double_option {

@@ -4,14 +4,88 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::permissions::Permissions;
-use crate::{ChannelId, DeviceId, FileId, GuildId, MessageId, RoleId, UserId};
+use crate::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, RoleId, UserId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
+    /// Account name: unique, used to sign in and to add friends.
     pub username: String,
+    /// Name shown to others (falls back to `username`).
     pub display_name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Profile picture, served at `GET /api/v1/files/{id}`.
+    #[serde(default)]
+    pub avatar_id: Option<FileId>,
+}
+
+impl User {
+    /// The name to show: display name, or the account name.
+    pub fn name(&self) -> &str {
+        self.display_name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&self.username)
+    }
+}
+
+/// What a user shows others. `Invisible` looks offline to everyone else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserStatus {
+    #[default]
+    Online,
+    /// Away.
+    Idle,
+    /// Busy: no notifications.
+    Dnd,
+    /// Shown as offline.
+    Invisible,
+}
+
+impl UserStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Idle => "idle",
+            Self::Dnd => "dnd",
+            Self::Invisible => "invisible",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "idle" => Self::Idle,
+            "dnd" => Self::Dnd,
+            "invisible" => Self::Invisible,
+            _ => Self::Online,
+        }
+    }
+}
+
+/// Which messages in a guild notify a member.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyLevel {
+    #[default]
+    All,
+    Mentions,
+    Nothing,
+}
+
+impl NotifyLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Mentions => "mentions",
+            Self::Nothing => "nothing",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "mentions" => Self::Mentions,
+            "nothing" => Self::Nothing,
+            _ => Self::All,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,11 +103,21 @@ pub struct Guild {
     /// Minutes without activity before moving to the AFK channel.
     #[serde(default = "default_afk_minutes")]
     pub afk_timeout_minutes: u32,
+    /// Opus bitrate for microphones in all of this guild's voice channels.
+    #[serde(default = "default_audio_bitrate")]
+    pub audio_bitrate: u32,
 }
 
 fn default_afk_minutes() -> u32 {
     15
 }
+
+pub fn default_audio_bitrate() -> u32 {
+    128_000
+}
+
+/// Voice bitrates a guild can choose, in bits per second.
+pub const AUDIO_BITRATES: [u32; 4] = [64_000, 128_000, 256_000, 320_000];
 
 /// AFK timeouts the server accepts, in minutes.
 pub const AFK_TIMEOUTS: [u32; 5] = [1, 5, 15, 30, 60];
@@ -74,9 +158,9 @@ impl ChannelKind {
         matches!(self, Self::Dm | Self::Group)
     }
 
-    /// Channels with a message history.
+    /// Channels with a message history (voice channels have a chat too).
     pub fn has_messages(self) -> bool {
-        !matches!(self, Self::Voice)
+        true
     }
 
     /// Channels you can join a call in.
@@ -95,6 +179,18 @@ pub struct Channel {
     pub position: i32,
     /// Voice channels can require end-to-end encrypted media.
     pub e2ee: bool,
+    /// The category it is listed under (guild channels only).
+    #[serde(default)]
+    pub category_id: Option<CategoryId>,
+}
+
+/// A named group of channels in a guild's channel list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Category {
+    pub id: CategoryId,
+    pub guild_id: GuildId,
+    pub name: String,
+    pub position: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

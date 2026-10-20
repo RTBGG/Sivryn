@@ -9,6 +9,7 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use tokio::sync::watch;
 
 /// One decoded frame, tightly packed RGBA8 (ready for a GPU texture upload).
+#[derive(Clone)]
 pub struct RgbaFrame {
     pub width: u32,
     pub height: u32,

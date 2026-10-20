@@ -44,25 +44,30 @@ pub async fn upload(
     Ok((StatusCode::CREATED, Json(UploadedFile { id, size: body.len() as u64 })))
 }
 
-/// Serves a file to anyone who may read its channel (attachments) or who is
-/// a member of its guild (icons).
+/// A file's channel, guild, owner and content type.
+type FileAccessRow = (Option<Uuid>, Option<Uuid>, Option<Uuid>, String);
+
+/// Serves a file to anyone who may read its channel (attachments), who is a
+/// member of its guild (icons), or to anyone signed in (avatars, banners).
 pub async fn download(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(file_id): Path<FileId>,
 ) -> ApiResult<impl IntoResponse> {
-    let row: Option<(Option<Uuid>, Option<Uuid>, String)> =
-        sqlx::query_as("SELECT channel_id, guild_id, content_type FROM files WHERE id = $1")
+    let row: Option<FileAccessRow> =
+        sqlx::query_as("SELECT channel_id, guild_id, owner_user_id, content_type FROM files WHERE id = $1")
             .bind(file_id.0)
             .fetch_optional(&state.db)
             .await?;
-    let (channel, guild, content_type) = row.ok_or(ApiError::NotFound)?;
-    match (channel, guild) {
-        (Some(channel), _) => {
+    let (channel, guild, owner, content_type) = row.ok_or(ApiError::NotFound)?;
+    match (channel, guild, owner) {
+        (Some(channel), _, _) => {
             db::require_channel(&state.db, ChannelId(channel), auth.id, Permissions::VIEW_CHANNEL).await?;
         }
-        (None, Some(guild)) => db::require(&state.db, GuildId(guild), auth.id, Permissions::empty()).await?,
-        (None, None) => return Err(ApiError::NotFound),
+        (None, Some(guild), _) => db::require(&state.db, GuildId(guild), auth.id, Permissions::empty()).await?,
+        // Avatars and banners are public to signed-in users.
+        (None, None, Some(_)) => {}
+        (None, None, None) => return Err(ApiError::NotFound),
     }
     let bytes = crate::storage::load(&state.config.files_dir, file_id).await.map_err(|_| ApiError::NotFound)?;
     Ok((

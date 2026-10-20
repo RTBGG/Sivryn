@@ -2,11 +2,13 @@
 //! dropdowns, segmented buttons, meters, plus avatars.
 
 use dioxus_native::prelude::*;
-use sivryn_client_core::protocol::UserId;
+use sivryn_client_core::protocol::model::UserStatus;
+use sivryn_client_core::protocol::{FileId, UserId};
 
 use super::icons::{Icon, Svg};
 
-/// Colorful initials, the color derived from the user ID so it's stable.
+/// A user's profile picture, or colorful initials (the color derived from
+/// the user ID so it's stable). `speaking` draws a green ring around it.
 #[component]
 pub fn Avatar(
     name: String,
@@ -15,18 +17,65 @@ pub fn Avatar(
     #[props(default)] speaking: bool,
 ) -> Element {
     const PALETTE: [&str; 8] = ["#7c6cff", "#3ba7ff", "#2fbf8f", "#f2994a", "#eb5a8c", "#9b6cff", "#16b5c8", "#e2b93b"];
+    let state = use_context::<super::AppState>();
+    let picture = id.and_then(|id| state.avatars.read().get(&id).copied());
     let seed = id.map(|id| id.0.as_u128() as usize).unwrap_or_else(|| name.bytes().map(usize::from).sum());
     let color = PALETTE[seed % PALETTE.len()];
     let initials: String = name.chars().filter(|c| c.is_alphanumeric()).take(2).collect::<String>().to_uppercase();
     let font = size * 2 / 5;
     let class = if speaking { "avatar speaking" } else { "avatar" };
+    let background = if picture.is_some() { "transparent" } else { color };
     rsx! {
         div {
             class: "{class}",
-            style: "width: {size}px; height: {size}px; min-width: {size}px; font-size: {font}px; background: {color};",
-            "{initials}"
+            style: "width: {size}px; height: {size}px; min-width: {size}px; font-size: {font}px; background: {background};",
+            // Keys only work in lists: a new picture must get a new canvas.
+            for file in picture.iter() {
+                RemoteImage { key: "{file}", file: *file, size: size * 2, round: true }
+            }
+            if picture.is_none() {
+                "{initials}"
+            }
         }
     }
+}
+
+/// A public image (avatar, banner, server icon) filling its parent.
+#[component]
+pub fn RemoteImage(file: FileId, size: u32, #[props(default)] round: bool) -> Element {
+    let state = use_context::<super::AppState>();
+    let frames = use_resource(use_reactive!(|file, size, round| async move {
+        let s = state.session.cloned()?;
+        let bytes = crate::files::fetch_plain(&s, file).await.ok()?;
+        let decoded = tokio::task::spawn_blocking(move || {
+            let mut d = crate::files::decode(&bytes, size, size).ok()?;
+            if round {
+                crate::files::round(&mut d);
+            }
+            Some(d)
+        })
+        .await
+        .ok()??;
+        Some((file, crate::files::play(decoded)))
+    }));
+    let loaded = frames.read().clone().flatten();
+    rsx! {
+        for (id, frames) in loaded {
+            super::media::FrameCanvas { key: "{id}", frames: super::media::Frames(frames) }
+        }
+    }
+}
+
+/// A presence dot in the status's color; `None` is offline.
+#[component]
+pub fn StatusDot(status: Option<UserStatus>, #[props(default)] class: String) -> Element {
+    let kind = match status {
+        Some(UserStatus::Online) => "online",
+        Some(UserStatus::Idle) => "idle",
+        Some(UserStatus::Dnd) => "dnd",
+        Some(UserStatus::Invisible) | None => "offline",
+    };
+    rsx! { div { class: "presence-dot {kind} {class}" } }
 }
 
 #[component]

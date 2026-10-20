@@ -7,7 +7,7 @@ use sivryn_client_core::protocol::api::{Relationship, UserProfile};
 
 use super::AppState;
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, IconButton};
+use super::widgets::{Avatar, IconButton, RemoteImage, StatusDot};
 use crate::i18n::t;
 
 #[derive(Clone, Copy)]
@@ -38,7 +38,7 @@ pub fn ProfileDialog(user: UserId) -> Element {
     }));
 
     let me = state.me() == Some(user);
-    let online = state.online.read().contains(&user);
+    let status = state.status_of(user);
     let close = move |_| state.modal.set(None);
     let Some(p) = profile.read().clone() else {
         return rsx! {
@@ -47,7 +47,12 @@ pub fn ProfileDialog(user: UserId) -> Element {
             }
         };
     };
-    let name = p.user.display_name.clone().unwrap_or_else(|| p.user.username.clone());
+    // In a guild, the name chosen there comes first.
+    let guild = if *state.home.peek() { None } else { *state.guild.peek() };
+    let name = state.display_name_in(guild, user);
+    let global = p.user.name().to_owned();
+    let bio = p.bio.clone();
+    let banner = p.banner_id;
     let since = p.user.created_at.with_timezone(&chrono::Local).format("%d.%m.%Y").to_string();
     let guilds: Vec<String> = p.mutual_guilds.iter().filter_map(|g| state.guild(*g)).map(|g| g.name).collect();
     let api = move |action: Action| {
@@ -69,16 +74,34 @@ pub fn ProfileDialog(user: UserId) -> Element {
     rsx! {
         div { class: "overlay", onclick: close,
             div { class: "dialog profile", onclick: move |e| e.stop_propagation(),
-                div { class: "profile-banner" }
+                div { class: "profile-banner",
+                    for file in banner.iter() {
+                        RemoteImage { key: "{file}", file: *file, size: 800 }
+                    }
+                }
                 div { class: "profile-head",
                     div { class: "profile-avatar",
                         Avatar { name: name.clone(), id: Some(user), size: 84 }
-                        div { class: if online { "presence-dot large online" } else { "presence-dot large" } }
+                        StatusDot { status, class: "large" }
                     }
                     IconButton { icon: Icon::X, size: 18, onclick: close }
                 }
                 div { class: "profile-name", "{name}" }
-                div { class: "muted", "@{p.user.username}" }
+                div { class: "muted",
+                    "@{p.user.username}"
+                    if global != name {
+                        " · {global}"
+                    }
+                }
+                if let Some(s) = status {
+                    div { class: "muted small", "{super::shell::status_label(s)}" }
+                }
+                if !bio.is_empty() {
+                    div { class: "profile-section",
+                        div { class: "field-label", {t("profile.about")} }
+                        div { class: "profile-bio selectable", "{bio}" }
+                    }
+                }
                 div { class: "profile-section",
                     div { class: "field-label", {t("profile.member_since")} }
                     div { "{since}" }
@@ -87,6 +110,17 @@ pub fn ProfileDialog(user: UserId) -> Element {
                     div { class: "profile-section",
                         div { class: "field-label", {t("profile.mutual_servers")} }
                         div { "{guilds.join(\", \")}" }
+                    }
+                }
+                if me {
+                    div { class: "profile-actions",
+                        button { class: "button primary", onclick: move |_| {
+                                state.modal.set(None);
+                                state.settings_page.set(Some(super::SettingsPage::Account));
+                            },
+                            Svg { icon: Icon::Pencil, size: 16 }
+                            {t("profile.edit")}
+                        }
                     }
                 }
                 if !me {

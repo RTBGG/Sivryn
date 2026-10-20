@@ -57,9 +57,11 @@ mod stylo_to_parley;
 mod traversal;
 mod url;
 
+pub mod bundled_fonts;
 pub mod caret;
 // Sivryn patch: static text selection and bottom-pinned scrolling.
 mod stick_bottom;
+mod zoom_anchor;
 pub mod text_selection;
 pub mod net;
 pub mod util;

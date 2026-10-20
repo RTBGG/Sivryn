@@ -126,3 +126,27 @@ REST writes go to PostgreSQL and then to `EventBus::publish`, addressed to a gui
 users (DMs, friends) or devices (MLS welcomes). Every gateway connection subscribes to the bus
 and keeps what is addressed to it. Presence is counted per user across their connections. With NATS configured, events cross instances. A client that falls too
 far behind is disconnected and resyncs on reconnect.
+
+Presence carries a status (online, away, busy). Invisible users are announced as offline to
+everyone else; busy users get no desktop notifications.
+
+## Read states and notifications
+
+The server stores, per user and channel, the newest message ID they have read (`read_states`).
+Message IDs are UUIDv7, so "unread" is just "newer than the stored ID", and the counts are
+computed on the server when a client starts. While running, the client counts new messages
+itself and acknowledges the newest one once per channel when it is read (opening the channel,
+or the window gaining focus with that channel open). Mutes (with an optional end time) and the
+per-server notification level (all messages, mentions only, nothing) are stored on the server
+too, so they follow the account to other devices. Notifications are Windows toasts (WinRT,
+registered under the app ID `Sivryn.Desktop`); clicking one opens its channel.
+
+## Client caching
+
+Files are cached on disk in `%LOCALAPPDATA%\Sivryn\cache\files` exactly as the server stores
+them: attachments and link preview images stay encrypted there (their keys only live in the
+encrypted message store), public files such as server icons, avatars and banners are plain.
+The cache is trimmed to 1 GB at startup, least recently used first. Decrypted files are only
+kept in memory for the session. The share
+picker's live previews use the same Windows Graphics Capture path as sharing itself, one frame
+per second per source, scaled down on the capture thread.

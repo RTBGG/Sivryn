@@ -764,6 +764,19 @@ impl ElementCx<'_> {
     ///
     /// [*] The effect depends on the border-color value
     fn draw_border_edge(&self, sb: &mut impl PaintScene, edge: Edge) {
+        // Sivryn patch: skip edges without width. Filling the (empty) edge
+        // shape of a borderless element still let anti-aliasing draw a faint
+        // hairline along it whenever the element sat at a fractional pixel.
+        let widths = self.node.final_layout.border;
+        let width = match edge {
+            Edge::Top => widths.top,
+            Edge::Right => widths.right,
+            Edge::Bottom => widths.bottom,
+            Edge::Left => widths.left,
+        };
+        if width <= 0.0 {
+            return;
+        }
         let style = &*self.style;
         let border = style.get_border();
         let path = self.frame.border_edge_shape(edge);

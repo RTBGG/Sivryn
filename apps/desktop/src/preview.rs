@@ -13,11 +13,14 @@ use sivryn_client_core::protocol::model::Embed;
 use crate::files;
 use crate::session::Session;
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pages and images larger than this aren't previewed.
-const MAX_FETCH_BYTES: usize = 8 * 1024 * 1024;
-/// Preview images are scaled down to this edge before uploading.
-const PREVIEW_EDGE: u32 = 640;
+const MAX_FETCH_BYTES: usize = 32 * 1024 * 1024;
+/// Images up to this size are sent as they are, so they look exactly like
+/// the original when opened.
+const MAX_ORIGINAL_BYTES: usize = 8 * 1024 * 1024;
+/// Larger images are scaled down to this edge before uploading.
+const LARGE_IMAGE_EDGE: u32 = 4096;
 
 /// A piece of message text: plain text or a link.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,34 +177,51 @@ fn absolute(base: &str, link: &str) -> String {
     format!("{}/{link}", base[..origin_end].trim_end_matches('/'))
 }
 
-/// Downscales, uploads (encrypted) and describes a preview image.
+/// Uploads (encrypted) and describes a preview image: the original up to
+/// 8 MB, otherwise a copy scaled down to 4096 pixels.
 async fn upload_image(
     s: &Session,
     channel: ChannelId,
     bytes: Vec<u8>,
     name: &str,
 ) -> Option<sivryn_client_core::protocol::model::Attachment> {
-    let img = image::load_from_memory(&bytes).ok()?;
-    // Keep GIFs as they are so they stay animated; shrink everything else.
-    let is_gif = image::guess_format(&bytes).ok() == Some(image::ImageFormat::Gif);
-    let data = if is_gif || (img.width() <= PREVIEW_EDGE && img.height() <= PREVIEW_EDGE) {
-        bytes
-    } else {
-        let small = img.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE);
-        let mut out = Vec::new();
-        small.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
-        out
-    };
-    let file = files::prepare(name.to_owned(), data);
+    let data = tokio::task::spawn_blocking(move || shrink_if_large(bytes)).await.ok()??;
+    let file = tokio::task::spawn_blocking({
+        let name = name.to_owned();
+        move || files::prepare(name, data)
+    })
+    .await
+    .ok()?;
     files::upload(s, channel, &file).await.ok()
+}
+
+/// The image as it is when small enough, else scaled down (as JPEG). GIFs
+/// keep their animation and are never re-encoded. `None` if it's no image.
+fn shrink_if_large(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    let format = image::guess_format(&bytes).ok()?;
+    if bytes.len() <= MAX_ORIGINAL_BYTES || format == image::ImageFormat::Gif {
+        // Still check it decodes, so broken files aren't sent as images.
+        image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
+        return Some(bytes);
+    }
+    let img = image::load_from_memory(&bytes).ok()?;
+    let small = img.thumbnail(LARGE_IMAGE_EDGE, LARGE_IMAGE_EDGE).to_rgb8();
+    let mut out = Vec::new();
+    small.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).ok()?;
+    Some(out)
+}
+
+/// The last path segment of a URL, without query or fragment ("image" if empty).
+fn file_name(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.rsplit('/').next().filter(|n| !n.is_empty() && !n.contains(':')).unwrap_or("image").to_owned()
 }
 
 /// Builds the preview for a link, or `None` if the page has nothing to show.
 pub async fn build(s: &Session, channel: ChannelId, url: &str) -> Option<Embed> {
     let (content_type, body) = fetch_limited(url).await?;
     if content_type.starts_with("image/") {
-        let name = url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("image");
-        let image = upload_image(s, channel, body, name).await?;
+        let image = upload_image(s, channel, body, &file_name(url)).await?;
         return Some(Embed {
             url: url.into(),
             title: None,
@@ -227,7 +247,7 @@ pub async fn build(s: &Session, channel: ChannelId, url: &str) -> Option<Embed> 
         && let Some((ct, bytes)) = fetch_limited(&image_url).await
         && ct.starts_with("image/")
     {
-        image = upload_image(s, channel, bytes, "preview").await;
+        image = upload_image(s, channel, bytes, &file_name(&image_url)).await;
     }
     let clip = |s: String, n: usize| {
         if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s }
@@ -261,6 +281,8 @@ mod tests {
         );
         assert_eq!(segments("no links"), vec![Segment::Text("no links")]);
         assert_eq!(first_link("a https://b.c d"), Some("https://b.c"));
+        assert_eq!(file_name("https://x.org/img/cat.png?w=200#top"), "cat.png");
+        assert_eq!(file_name("https://x.org/"), "image");
         assert_eq!(segments("https://"), vec![Segment::Text("https://")]);
     }
 

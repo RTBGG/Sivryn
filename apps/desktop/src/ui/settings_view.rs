@@ -8,11 +8,13 @@ use sivryn_media::codec::HardwareEncoders;
 use sivryn_media::{CameraQuality, NoiseSuppression, VoiceMode, list_cameras, media_foundation_available};
 
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, IconButton, Segmented, Select, Slider, Toggle, opt};
+use super::widgets::{Avatar, IconButton, RemoteImage, Segmented, Select, Slider, Toggle, opt};
 use super::{AppState, CapturedKey, Services, SettingsPage};
 use crate::hotkeys::Keybind;
 use crate::i18n::t;
-use crate::settings::{Keybinds, Language, ScreenQuality, Theme};
+use crate::settings::{Keybinds, Language, SCREEN_FPS, ScreenResolution, Theme};
+use sivryn_client_core::protocol::GuildId;
+use sivryn_client_core::protocol::api::UpdateMeRequest;
 
 const PAGES: [(SettingsPage, Icon, &str); 8] = [
     (SettingsPage::Account, Icon::User, "settings.account"),
@@ -104,20 +106,158 @@ fn AccountPage() -> Element {
     let state = use_context::<AppState>();
     let session = state.session.read();
     let Some(s) = session.as_ref() else { return rsx! {} };
-    let name = s.user.display_name.clone().unwrap_or_else(|| s.user.username.clone());
-    let (username, id, instance, device) =
-        (s.user.username.clone(), s.user.id, s.api.base_url().to_owned(), s.device_id);
+    let (username, id, instance, device, global_name) = (
+        s.user.username.clone(),
+        s.user.id,
+        s.api.base_url().to_owned(),
+        s.device_id,
+        s.user.display_name.clone().unwrap_or_default(),
+    );
     drop(session);
+    let name = state.username(id);
+    let mut display = use_signal(move || global_name);
+    let mut bio = use_signal(String::new);
+    let mut banner = use_signal(|| None::<sivryn_client_core::protocol::FileId>);
+    let mut loaded = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    // Description and banner come with the account settings.
+    use_hook(move || {
+        let Some(s) = state.session.cloned() else { return };
+        spawn(async move {
+            if let Ok(me) = s.api.me_settings().await {
+                bio.set(me.bio);
+                banner.set(me.banner_id);
+            }
+            loaded.set(true);
+        });
+    });
+
+    let save = move |_| {
+        let Some(s) = state.session.cloned() else { return };
+        busy.set(true);
+        let name = display.peek().trim().to_owned();
+        let req = UpdateMeRequest {
+            display_name: Some(Some(name).filter(|n| !n.is_empty())),
+            bio: Some(bio.peek().trim().to_owned()),
+            ..Default::default()
+        };
+        spawn(async move {
+            let result = s.api.update_me(&req).await;
+            busy.set(false);
+            match result {
+                Ok(_) => state.toast(t("profile.saved"), false),
+                Err(e) => state.report(Err(e.to_string())),
+            }
+        });
+    };
+    let pick_image = move |is_banner: bool| {
+        let Some(s) = state.session.cloned() else { return };
+        spawn_forever(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title(if is_banner { t("profile.pick_banner") } else { t("profile.pick_avatar") })
+                .add_filter(t("profile.images"), &["png", "jpg", "jpeg", "gif", "webp"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let bytes = file.read().await;
+            // Avatars become 256 px squares, banners 960×340; animated GIFs stay as they are.
+            let prepared = tokio::task::spawn_blocking(move || crate::files::profile_image(&bytes, is_banner))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+            let result = match prepared {
+                Ok((mime, data)) => s.api.set_profile_image(is_banner, mime, data).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(uploaded) if is_banner => banner.set(Some(uploaded.id)),
+                Ok(_) => {}
+                Err(e) => state.report(Err(e)),
+            }
+        });
+    };
+    let remove_image = move |is_banner: bool| {
+        let Some(s) = state.session.cloned() else { return };
+        spawn_forever(async move {
+            match s.api.remove_profile_image(is_banner).await {
+                Ok(()) if is_banner => banner.set(None),
+                Ok(()) => {}
+                Err(e) => state.report(Err(e.to_string())),
+            }
+        });
+    };
+    let has_avatar = state.avatars.read().contains_key(&id);
+    let current_banner = *banner.read();
+    let guilds: Vec<(GuildId, String, String)> = state
+        .guilds
+        .read()
+        .iter()
+        .map(|g| (g.guild.id, g.guild.name.clone(), g.nick.clone().unwrap_or_default()))
+        .collect();
 
     rsx! {
         h1 { class: "section-title", {t("settings.account")} }
-        div { class: "account-card",
-            Avatar { name: name.clone(), id: Some(id), size: 64 }
-            div {
-                div { class: "account-name", "{name}" }
-                div { class: "muted", "@{username}" }
+        div { class: "profile-editor",
+            div { class: "profile-preview",
+                div { class: "profile-banner",
+                    for file in current_banner.iter() {
+                        RemoteImage { key: "{file}", file: *file, size: 800 }
+                    }
+                }
+                div { class: "profile-preview-body",
+                    div { class: "profile-avatar", Avatar { name: name.clone(), id: Some(id), size: 84 } }
+                    div { class: "account-name", "{name}" }
+                    div { class: "muted", "@{username}" }
+                    if !bio.read().trim().is_empty() {
+                        div { class: "profile-bio small", style: "margin-top: 10px;", "{bio}" }
+                    }
+                }
+            }
+            div { class: "row wrap",
+                button { class: "button small", onclick: move |_| pick_image(false), {t("profile.change_avatar")} }
+                if has_avatar {
+                    button { class: "button small ghost", onclick: move |_| remove_image(false), {t("profile.remove_avatar")} }
+                }
+                button { class: "button small", onclick: move |_| pick_image(true), {t("profile.change_banner")} }
+                if current_banner.is_some() {
+                    button { class: "button small ghost", onclick: move |_| remove_image(true), {t("profile.remove_banner")} }
+                }
             }
         }
+        Field { label: t("profile.account_name").to_string(), hint: t("profile.account_name_hint").to_string(),
+            div { class: "readonly-field", "@{username}" }
+        }
+        Field { label: t("profile.display_name").to_string(), hint: t("profile.display_name_hint").to_string(),
+            input {
+                class: "input",
+                value: "{display}",
+                placeholder: "{username}",
+                maxlength: "32",
+                oninput: move |e| display.set(e.value()),
+            }
+        }
+        Field { label: t("profile.about").to_string(), hint: t("profile.about_hint").to_string(),
+            textarea {
+                class: "input textarea",
+                value: "{bio}",
+                maxlength: "190",
+                oninput: move |e| bio.set(e.value()),
+            }
+        }
+        div { class: "row",
+            button { class: if *busy.read() || !*loaded.read() { "button primary busy" } else { "button primary" }, onclick: save, {t("common.save")} }
+        }
+        if !guilds.is_empty() {
+            div { class: "divider" }
+            h2 { class: "subsection", {t("profile.server_names")} }
+            p { class: "muted small lead-tight", {t("profile.server_names_hint")} }
+            for (gid, gname, nick) in guilds {
+                ServerNameRow { key: "{gid}", guild: gid, guild_name: gname, nick, placeholder: name.clone() }
+            }
+        }
+        div { class: "divider" }
         div { class: "info-grid",
             div { class: "info-label", {t("settings.instance")} }
             div { "{instance}" }
@@ -135,6 +275,48 @@ fn AccountPage() -> Element {
             },
             Svg { icon: Icon::LogOut, size: 16 }
             {t("settings.logout")}
+        }
+    }
+}
+
+/// Your name in one server.
+#[component]
+fn ServerNameRow(guild: GuildId, guild_name: String, nick: String, placeholder: String) -> Element {
+    let state = use_context::<AppState>();
+    let mut value = use_signal(move || nick);
+    let mut saved = use_signal(|| false);
+    let save = move || {
+        let Some(s) = state.session.cloned() else { return };
+        let v = value.peek().trim().to_owned();
+        spawn(async move {
+            let nick = Some(Some(v).filter(|n| !n.is_empty()));
+            match s.api.update_my_member(guild, nick, None).await {
+                Ok(()) => saved.set(true),
+                Err(e) => state.report(Err(e.to_string())),
+            }
+        });
+    };
+    rsx! {
+        div { class: "server-name-row",
+            span { class: "server-name-label", "{guild_name}" }
+            input {
+                class: "input",
+                value: "{value}",
+                placeholder: "{placeholder}",
+                maxlength: "32",
+                oninput: move |e| {
+                    value.set(e.value());
+                    saved.set(false);
+                },
+                onkeydown: move |e| {
+                    if e.key() == Key::Enter {
+                        save();
+                    }
+                },
+            }
+            button { class: "button small", onclick: move |_| save(),
+                if *saved.read() { Svg { icon: Icon::Check, size: 14 } } else { {t("common.save")} }
+            }
         }
     }
 }
@@ -356,13 +538,24 @@ fn VideoPage() -> Element {
         }
         div { class: "divider" }
         h2 { class: "subsection", {t("video.screen")} }
-        Field { label: t("share.quality").to_string(), hint: t("video.screen_quality_hint").to_string(),
+        Field { label: t("share.resolution").to_string(), hint: t("video.screen_quality_hint").to_string(),
             Segmented {
-                value: format!("{:?}", video.screen_quality),
-                options: ScreenQuality::ALL.iter().map(|q| opt(format!("{q:?}"), q.label())).collect(),
+                value: format!("{:?}", video.screen_resolution),
+                options: ScreenResolution::ALL.iter().map(|r| opt(format!("{r:?}"), r.label())).collect(),
                 onchange: move |v: String| {
-                    if let Some(q) = ScreenQuality::ALL.into_iter().find(|q| format!("{q:?}") == v) {
-                        state.update_settings(|s| s.video.screen_quality = q);
+                    if let Some(r) = ScreenResolution::ALL.into_iter().find(|r| format!("{r:?}") == v) {
+                        state.update_settings(|s| s.video.screen_resolution = r);
+                    }
+                },
+            }
+        }
+        Field { label: t("share.fps").to_string(),
+            Segmented {
+                value: video.screen_fps.to_string(),
+                options: SCREEN_FPS.iter().map(|f| opt(f.to_string(), format!("{f} FPS"))).collect(),
+                onchange: move |v: String| {
+                    if let Ok(f) = v.parse() {
+                        state.update_settings(|s| s.video.screen_fps = f);
                     }
                 },
             }
@@ -385,12 +578,17 @@ fn VideoPage() -> Element {
     }
 }
 
+/// Set while a keybind button records, so Escape clears the binding instead
+/// of closing the settings.
+pub static RECORDING_KEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Shows a binding; click to record a new key (Escape clears it).
 #[component]
 fn KeybindButton(bind: Option<Keybind>, set: EventHandler<Option<Keybind>>) -> Element {
     let services = use_context::<Services>();
     let mut captured = use_context::<CapturedKey>().0;
     let mut recording = use_signal(|| false);
+    use_effect(move || RECORDING_KEY.store(*recording.read(), std::sync::atomic::Ordering::Relaxed));
 
     // Take the key the hotkey thread reports while this button is recording.
     use_effect(move || {
@@ -404,7 +602,10 @@ fn KeybindButton(bind: Option<Keybind>, set: EventHandler<Option<Keybind>>) -> E
         }
     });
     let hotkeys = services.hotkeys.clone();
-    use_drop(move || hotkeys.cancel_capture());
+    use_drop(move || {
+        hotkeys.cancel_capture();
+        RECORDING_KEY.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
 
     let label = if *recording.read() {
         t("keys.press_key").to_string()
@@ -541,7 +742,7 @@ fn PrivacyPage() -> Element {
         let before = *allow_server_dms.peek();
         allow_server_dms.set(Some(v));
         spawn(async move {
-            let req = sivryn_client_core::protocol::api::UpdateMeRequest { allow_server_dms: Some(v) };
+            let req = UpdateMeRequest { allow_server_dms: Some(v), ..Default::default() };
             if let Err(e) = s.api.update_me(&req).await {
                 allow_server_dms.set(before);
                 state.report(Err(e.to_string()));
@@ -615,6 +816,12 @@ fn NotificationsPage() -> Element {
             hint: t("notify.messages_hint").to_string(),
             on: settings.notifications.message_sound,
             onchange: move |v| state.update_settings(|s| s.notifications.message_sound = v),
+        }
+        ToggleRow {
+            label: t("notify.desktop").to_string(),
+            hint: t("notify.desktop_hint").to_string(),
+            on: settings.notifications.desktop,
+            onchange: move |v| state.update_settings(|s| s.notifications.desktop = v),
         }
     }
 }

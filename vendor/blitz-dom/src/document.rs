@@ -216,6 +216,10 @@ impl BaseDocument {
                 font_ctx
                     .collection
                     .register_fonts(Blob::new(Arc::new(crate::BULLET_FONT) as _), None);
+                // Sivryn patch: fonts the app bundles (see bundled_fonts.rs).
+                for font in crate::bundled_fonts::all() {
+                    font_ctx.collection.register_fonts(Blob::new(Arc::new(font) as _), None);
+                }
                 font_ctx
             });
         let font_ctx = Arc::new(Mutex::new(font_ctx));
@@ -861,6 +865,8 @@ impl BaseDocument {
 
         // Sivryn patch: keep pinned scroll containers at the bottom.
         crate::stick_bottom::apply(self);
+        // Sivryn patch: zoomed content keeps its middle in place.
+        crate::zoom_anchor::apply(self);
 
         // Clear all damage
         #[cfg(feature = "incremental")]

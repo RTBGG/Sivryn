@@ -3,13 +3,13 @@
 
 use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
-use sivryn_client_core::protocol::model::ChannelKind;
+use sivryn_client_core::protocol::model::{ChannelKind, UserStatus};
 use sivryn_client_core::protocol::{ChannelId, GuildId, UserId};
 
 use super::guild_settings::{GuildIcon, GuildSettings};
 use super::icons::{Icon, Logo, Svg};
-use super::widgets::{Avatar, IconButton};
-use super::{AppState, Connection, Modal, SettingsPage, call, chat_view, home, menu, profile, settings_view};
+use super::widgets::{Avatar, IconButton, StatusDot};
+use super::{AppState, Connection, Modal, SettingsPage, call, channels, chat_view, home, menu, profile, settings_view};
 use crate::i18n::t;
 
 #[component]
@@ -18,6 +18,7 @@ pub fn Shell() -> Element {
     let channel = *state.channel.read();
     let home = *state.home.read();
     let in_call_here = state.call.read().as_ref().is_some_and(|c| Some(c.channel) == channel);
+    let voice_chat = *state.voice_chat.read();
     let drag = *state.drag_over.read();
 
     rsx! {
@@ -29,6 +30,8 @@ pub fn Shell() -> Element {
                     div { class: "offline-bar", {t("shell.offline")} }
                 }
                 match channel.and_then(|c| state.channel_kind(c)) {
+                    // A voice channel's own chat.
+                    Some(ChannelKind::Voice) if voice_chat => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },
                     Some(ChannelKind::Voice) if in_call_here => rsx! { call::CallView {} },
                     Some(ChannelKind::Voice) => rsx! { call::JoinPrompt { channel: channel.unwrap() } },
                     Some(_) => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },
@@ -90,12 +93,18 @@ fn select_guild(mut state: AppState, id: GuildId) {
             .find(|g| g.guild.id == id)
             .and_then(|g| g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
         state.channel.set(first);
+        state.voice_chat.set(false);
         if let Some(c) = first {
-            state.unread.write().remove(&c);
+            state.mark_read(c);
         }
         state.update_settings(|s| s.last_guild = Some(id));
         spawn_forever(state.refresh_voice());
     }
+}
+
+/// "99+" style counter text.
+fn count_label(n: u32) -> String {
+    if n > 99 { "99+".into() } else { n.to_string() }
 }
 
 #[component]
@@ -103,17 +112,21 @@ fn GuildRail() -> Element {
     let mut state = use_context::<AppState>();
     let home = *state.home.read();
     let selected = if home { None } else { *state.guild.read() };
-    let unread = state.unread.read().clone();
     let me = state.me();
     // DMs with unread messages appear under the logo, like elsewhere.
-    let unread_dms: Vec<(ChannelId, String, Option<UserId>)> = state
+    let unread_dms: Vec<(ChannelId, String, Option<UserId>, u32)> = state
         .dms
         .read()
         .iter()
-        .filter(|d| unread.contains(&d.channel.id))
-        .map(|d| (d.channel.id, state.dm_title(d), d.members.iter().find(|u| Some(u.id) != me).map(|u| u.id)))
+        .filter_map(|d| {
+            let n = state.unread_count(d.channel.id);
+            (n > 0).then(|| {
+                let partner = d.members.iter().find(|u| Some(u.id) != me).map(|u| u.id);
+                (d.channel.id, state.dm_title(d), partner, n)
+            })
+        })
         .collect();
-    let incoming = state.friends.read().incoming.len();
+    let home_count = state.home_unread();
 
     rsx! {
         nav { class: "rail",
@@ -121,16 +134,17 @@ fn GuildRail() -> Element {
                 div { class: if home { "rail-pill active" } else { "rail-pill" } }
                 div { class: if home { "rail-logo active" } else { "rail-logo" }, title: t("home.title"), onclick: move |_| state.open_home(),
                     Logo { size: 48 }
-                    if incoming > 0 {
-                        span { class: "rail-badge", "{incoming}" }
+                    if home_count > 0 {
+                        span { class: "rail-badge", "{count_label(home_count)}" }
                     }
                 }
             }
-            for (id, title, partner) in unread_dms {
+            for (id, title, partner, n) in unread_dms {
                 div { key: "{id}", class: "rail-entry",
                     div { class: "rail-pill unread" }
                     div { class: "rail-dm", title: "{title}", onclick: move |_| state.open_channel(id),
                         Avatar { name: title.clone(), id: partner, size: 48 }
+                        span { class: "rail-badge", "{count_label(n)}" }
                     }
                 }
             }
@@ -139,20 +153,25 @@ fn GuildRail() -> Element {
                 {
                     let id = g.guild.id;
                     let active = Some(id) == selected;
-                    let has_unread = g.channels.iter().any(|c| unread.contains(&c.id));
+                    let unread = state.guild_unread(id);
                     rsx! {
                         div { key: "{id}", class: "rail-entry",
-                            div { class: if active { "rail-pill active" } else if has_unread { "rail-pill unread" } else { "rail-pill" } }
-                            div {
-                                class: if active { "rail-item active" } else { "rail-item" },
-                                title: "{g.guild.name}",
-                                onclick: move |_| select_guild(state, id),
-                                onmousedown: move |e| {
-                                    if let Some((x, y)) = menu::right_click(&e) {
-                                        menu::open(state, x, y, menu::guild_items(state, id));
-                                    }
-                                },
-                                GuildIcon { name: g.guild.name.clone(), icon: g.guild.icon_id, size: 48 }
+                            div { class: if active { "rail-pill active" } else if unread > 0 { "rail-pill unread" } else { "rail-pill" } }
+                            div { class: "rail-icon-wrap",
+                                div {
+                                    class: if active { "rail-item active" } else { "rail-item" },
+                                    title: "{g.guild.name}",
+                                    onclick: move |_| select_guild(state, id),
+                                    onmousedown: move |e| {
+                                        if let Some((x, y)) = menu::right_click(&e) {
+                                            menu::open(state, x, y, menu::guild_items(state, id));
+                                        }
+                                    },
+                                    GuildIcon { name: g.guild.name.clone(), icon: g.guild.icon_id, size: 48 }
+                                }
+                                if unread > 0 {
+                                    span { class: "rail-badge", "{count_label(unread)}" }
+                                }
                             }
                         }
                     }
@@ -176,7 +195,7 @@ fn GuildRail() -> Element {
 
 #[component]
 fn Sidebar() -> Element {
-    let mut state = use_context::<AppState>();
+    let state = use_context::<AppState>();
     if *state.home.read() {
         return rsx! {
             aside { class: "sidebar",
@@ -187,8 +206,8 @@ fn Sidebar() -> Element {
             }
         };
     }
-    let guilds = state.guilds.read();
-    let Some(guild) = guilds.iter().find(|g| Some(g.guild.id) == *state.guild.read()) else {
+    let guild = state.guilds.read().iter().find(|g| Some(g.guild.id) == *state.guild.read()).cloned();
+    let Some(guild) = guild else {
         return rsx! {
             aside { class: "sidebar",
                 div { class: "sidebar-header", "Sivryn" }
@@ -198,123 +217,12 @@ fn Sidebar() -> Element {
             }
         };
     };
-    let guild_id = guild.guild.id;
-    let selected = *state.channel.read();
-    let unread = state.unread.read();
-    let voice = state.voice.read();
-    let call = state.call.read();
-    let text: Vec<_> = guild.channels.iter().filter(|c| c.kind == ChannelKind::Text).cloned().collect();
-    let voice_channels: Vec<_> = guild.channels.iter().filter(|c| c.kind == ChannelKind::Voice).cloned().collect();
-    let afk = guild.guild.afk_channel_id;
-    let mut open = move |id: ChannelId| {
-        state.channel.set(Some(id));
-        state.unread.write().remove(&id);
-    };
-    let guild_menu = move |e: MouseEvent| {
-        let p = e.client_coordinates();
-        menu::open(state, p.x, p.y + 12.0, menu::guild_items(state, guild_id));
-    };
-
     rsx! {
         aside { class: "sidebar",
-            div { class: "sidebar-header clickable", onclick: guild_menu,
-                span { class: "guild-title", "{guild.guild.name}" }
-                Svg { icon: Icon::ChevronDown, size: 18 }
-            }
-            div { class: "channel-list",
-                div { class: "category", {t("shell.text_channels")} }
-                for c in text {
-                    div {
-                        key: "{c.id}",
-                        class: if Some(c.id) == selected { "channel active" } else if unread.contains(&c.id) { "channel unread" } else { "channel" },
-                        onclick: move |_| open(c.id),
-                        onmousedown: move |e| {
-                            if let Some((x, y)) = menu::right_click(&e) {
-                                menu::open(state, x, y, menu::channel_items(state, c.id));
-                            }
-                        },
-                        Svg { icon: Icon::Hash, size: 18 }
-                        span { class: "channel-name", "{c.name}" }
-                        if unread.contains(&c.id) && Some(c.id) != selected {
-                            div { class: "unread-dot" }
-                        }
-                    }
-                }
-                div { class: "category", {t("shell.voice_channels")} }
-                for c in voice_channels {
-                    div { key: "{c.id}",
-                        div {
-                            class: if Some(c.id) == selected { "channel active" } else { "channel" },
-                            onclick: move |_| open(c.id),
-                            Svg { icon: Icon::Volume, size: 18 }
-                            span { class: "channel-name", "{c.name}" }
-                            if afk == Some(c.id) {
-                                span { class: "afk-badge", "AFK" }
-                            }
-                        }
-                        div { class: "voice-members",
-                            // While connected, the live room is more current than the server's list.
-                            if let Some(live) = call.as_ref().filter(|call| call.channel == c.id) {
-                                for p in live.participants.iter() {
-                                    VoiceMember {
-                                        key: "{p.identity}",
-                                        name: p.name.clone(),
-                                        id: p.identity.parse().ok(),
-                                        channel: c.id,
-                                        muted: p.muted,
-                                        sharing: p.sharing,
-                                        speaking: live.speakers.contains(&p.identity),
-                                    }
-                                }
-                            } else {
-                                for p in voice.get(&c.id).into_iter().flatten() {
-                                    VoiceMember {
-                                        key: "{p.user_id}",
-                                        name: state.username(p.user_id),
-                                        id: Some(p.user_id),
-                                        channel: c.id,
-                                        muted: p.muted,
-                                        sharing: p.screen_sharing,
-                                        speaking: false,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            channels::GuildHeader { key: "{guild.guild.id}", guild: guild.guild.id, name: guild.guild.name.clone() }
+            channels::ChannelList { guild: guild.clone() }
             VoicePanel {}
             UserPanel {}
-        }
-    }
-}
-
-#[component]
-fn VoiceMember(
-    name: String,
-    id: Option<UserId>,
-    channel: ChannelId,
-    muted: bool,
-    sharing: bool,
-    speaking: bool,
-) -> Element {
-    let state = use_context::<AppState>();
-    rsx! {
-        div {
-            class: "voice-member",
-            onmousedown: move |e| {
-                if let (Some(user), Some((x, y))) = (id, menu::right_click(&e)) {
-                    menu::open(state, x, y, menu::user_items(state, user, state.guild_of(channel), Some(channel)));
-                }
-            },
-            Avatar { name: name.clone(), id, size: 22, speaking }
-            span { class: "voice-member-name", "{name}" }
-            if sharing {
-                span { class: "live-badge", "LIVE" }
-            }
-            if muted {
-                span { class: "member-muted", Svg { icon: Icon::MicOff, size: 14 } }
-            }
         }
     }
 }
@@ -380,30 +288,36 @@ fn UserPanel() -> Element {
     });
     let session = state.session.read();
     let Some(s) = session.as_ref() else { return rsx! {} };
-    let (name, id) = (s.user.display_name.clone().unwrap_or_else(|| s.user.username.clone()), s.user.id);
+    let id = s.user.id;
     drop(session);
+    let name = state.username(id);
+    let my_status = *state.my_status.read();
     let muted = *state.muted.read();
     let deafened = *state.deafened.read();
     let in_call = state.call.read().is_some();
     let connection = *state.connection.read();
-    let status = match connection {
-        Connection::Online => t("shell.online"),
-        Connection::Connecting => t("shell.connecting"),
-        Connection::Offline => t("shell.offline_short"),
-    };
-    let dot = match connection {
-        Connection::Online => "status-dot online",
-        Connection::Connecting => "status-dot connecting",
-        Connection::Offline => "status-dot offline",
+    let (status, shown) = match connection {
+        Connection::Online => (status_label(my_status), Some(my_status)),
+        Connection::Connecting => (t("shell.connecting"), Some(UserStatus::Idle)),
+        Connection::Offline => (t("shell.offline_short"), None),
     };
 
     rsx! {
         div { class: "user-panel",
-            div { class: "user-info",
-                Avatar { name: name.clone(), id: Some(id), size: 34, speaking: in_call && *speaking.read() }
+            div {
+                class: "user-info",
+                title: t("profile.status_menu"),
+                onclick: move |e| {
+                    let p = e.client_coordinates();
+                    menu::open(state, p.x.max(8.0), (p.y - 250.0).max(8.0), menu::status_items(state));
+                },
+                div { class: "member-avatar",
+                    Avatar { name: name.clone(), id: Some(id), size: 34, speaking: in_call && *speaking.read() }
+                    StatusDot { status: shown, class: "panel" }
+                }
                 div { class: "user-text",
                     div { class: "user-name", "{name}" }
-                    div { class: "user-status", span { class: "{dot}" } "{status}" }
+                    div { class: "user-status", "{status}" }
                 }
             }
             div { class: "user-actions",
@@ -423,6 +337,15 @@ fn UserPanel() -> Element {
     }
 }
 
+pub fn status_label(status: UserStatus) -> &'static str {
+    match status {
+        UserStatus::Online => t("status.online"),
+        UserStatus::Idle => t("status.idle"),
+        UserStatus::Dnd => t("status.dnd"),
+        UserStatus::Invisible => t("status.invisible"),
+    }
+}
+
 #[component]
 fn ModalView() -> Element {
     let state = use_context::<AppState>();
@@ -436,6 +359,12 @@ fn ModalView() -> Element {
         Some(Modal::ConfirmDelete(channel, message)) => rsx! { chat_view::ConfirmDelete { channel, message } },
         Some(Modal::Profile(user)) => rsx! { profile::ProfileDialog { key: "{user}", user } },
         Some(Modal::ConfirmModeration { guild, user, ban }) => rsx! { ConfirmModeration { guild, user, ban } },
+        Some(Modal::CreateChannel(guild, category, kind)) => {
+            rsx! { channels::CreateChannelDialog { guild, category, kind } }
+        }
+        Some(Modal::Category(guild, existing)) => rsx! { channels::CategoryDialog { guild, existing } },
+        Some(Modal::ChannelSettings(channel)) => rsx! { channels::ChannelSettingsDialog { channel } },
+        Some(Modal::NotifySettings(guild)) => rsx! { channels::NotifyDialog { guild } },
         Some(modal) => rsx! { GuildDialog { key: "{modal:?}", modal } },
         None => rsx! {},
     }
@@ -564,7 +493,9 @@ fn GuildDialog(modal: Modal) -> Element {
         error.set(None);
         spawn(async move {
             let result = match modal {
-                Modal::CreateGuild => s.api.create_guild(&value).await,
+                Modal::CreateGuild => {
+                    s.api.create_guild(&value, t("channels.default_text"), t("channels.default_voice")).await
+                }
                 _ => s.api.accept_invite(&value).await,
             };
             busy.set(false);

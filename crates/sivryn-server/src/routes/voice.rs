@@ -68,6 +68,12 @@ pub async fn join(
         .to_jwt()
         .map_err(|e| anyhow::anyhow!("signing LiveKit token: {e}"))?;
 
+    // Guilds choose their voice bitrate; DMs and groups use the default.
+    let audio_bitrate = match channel.guild() {
+        Some(guild) => db::guild(&state.db, guild).await?.audio_bitrate,
+        None => sivryn_protocol::model::default_audio_bitrate(),
+    };
+
     // Ring the other members when a DM or group call starts.
     if channel.guild().is_none() {
         let others: Vec<UserId> =
@@ -85,6 +91,7 @@ pub async fn join(
         screen_share: state.config.screen_share.clone(),
         camera: state.config.camera.clone(),
         e2ee: channel.e2ee,
+        audio_bitrate,
     }))
 }
 
@@ -230,6 +237,32 @@ pub async fn remove_participant(state: &AppState, channel: ChannelId, user: User
     .await;
     if let Err(e) = result {
         tracing::debug!(error = %e, %channel, %user, "could not remove LiveKit participant");
+    }
+}
+
+/// Ends a voice channel's LiveKit room (the channel was deleted).
+pub async fn close_room(state: &AppState, channel: ChannelId) {
+    let result: anyhow::Result<()> = async {
+        let lk = &state.config.livekit;
+        let room = channel.to_string();
+        let token = AccessToken::with_api_key(&lk.api_key, &lk.api_secret)
+            .with_ttl(Duration::from_secs(60))
+            .with_grants(VideoGrants { room_create: true, room: room.clone(), ..Default::default() })
+            .to_jwt()?;
+        let resp = http()
+            .post(format!("{}/twirp/livekit.RoomService/DeleteRoom", lk.api_url))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "room": room }))
+            .send()
+            .await?;
+        if resp.status() != reqwest::StatusCode::NOT_FOUND {
+            resp.error_for_status()?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::debug!(error = %e, %channel, "could not close LiveKit room");
     }
 }
 

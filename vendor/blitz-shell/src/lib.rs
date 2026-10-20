@@ -12,6 +12,8 @@ mod application;
 mod convert_events;
 mod event;
 pub mod file_drop;
+pub mod escape;
+pub mod scrolling;
 mod net;
 mod window;
 

@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use sivryn_client_core::{ApiClient, connect_gateway};
 use sivryn_crypto::{Incoming, MlsDevice};
 use sivryn_protocol::api::{
-    ClaimedKeyPackage, GuildWithChannels, PendingWelcome, RegisterDeviceResponse, RegistrationMode, StoredCommit,
-    VoiceJoinResponse,
+    ClaimedKeyPackage, GuildMember, GuildWithChannels, PendingWelcome, RegisterDeviceResponse, RegistrationMode,
+    StoredCommit, VoiceJoinResponse,
 };
 use sivryn_protocol::gateway::{Event, ServerMessage};
 use sivryn_protocol::model::{ChannelKind, Message, MessageContent, User};
@@ -139,8 +139,8 @@ async fn guild_lifecycle_and_permissions() {
     assert_eq!(app.get(&format!("/guilds/{gid}/members"), &bob.token).await.0, StatusCode::NOT_FOUND);
 
     join_guild(&app, &alice, &bob, &guild).await;
-    let members: Vec<User> = app.get_ok(&format!("/guilds/{gid}/members"), &bob.token).await;
-    let names: Vec<&str> = members.iter().map(|u| u.username.as_str()).collect();
+    let members: Vec<GuildMember> = app.get_ok(&format!("/guilds/{gid}/members"), &bob.token).await;
+    let names: Vec<&str> = members.iter().map(|m| m.user.username.as_str()).collect();
     assert_eq!(names, ["alice", "bob"]);
 
     let bobs_guilds: Vec<GuildWithChannels> = app.get_ok("/guilds", &bob.token).await;
@@ -157,7 +157,7 @@ async fn guild_lifecycle_and_permissions() {
 
     // Accepting the same invite twice is harmless.
     join_guild(&app, &alice, &bob, &guild).await;
-    let members: Vec<User> = app.get_ok(&format!("/guilds/{gid}/members"), &alice.token).await;
+    let members: Vec<GuildMember> = app.get_ok(&format!("/guilds/{gid}/members"), &alice.token).await;
     assert_eq!(members.len(), 2);
 
     app.cleanup().await;
@@ -264,9 +264,10 @@ async fn messages_validate_and_paginate() {
     let msg = |device: DeviceId, ct: &str| json!({ "device_id": device, "epoch": 3, "ciphertext": ct });
     assert_eq!(app.post(&path, &alice.token, msg(a_dev, "")).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(app.post(&path, &alice.token, msg(b_dev, "x")).await.0, StatusCode::FORBIDDEN);
+    // Voice channels have a chat of their own.
     assert_eq!(
         app.post(&format!("/channels/{voice}/messages"), &alice.token, msg(a_dev, "x")).await.0,
-        StatusCode::BAD_REQUEST
+        StatusCode::CREATED
     );
     assert_eq!(app.post(&path, &bob.token, msg(b_dev, "x")).await.0, StatusCode::NOT_FOUND);
 

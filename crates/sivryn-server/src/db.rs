@@ -2,9 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use sivryn_protocol::gateway::Audience;
-use sivryn_protocol::model::{Channel, ChannelKind, Guild, Message, MessageKind, User};
+use sivryn_protocol::model::{Category, Channel, ChannelKind, Guild, Message, MessageKind, User, UserStatus};
 use sivryn_protocol::permissions::Permissions;
-use sivryn_protocol::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
+use sivryn_protocol::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -19,11 +19,27 @@ pub struct UserRow {
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,
     pub allow_server_dms: bool,
+    pub bio: String,
+    pub avatar_id: Option<Uuid>,
+    pub banner_id: Option<Uuid>,
+    pub status: String,
+}
+
+impl UserRow {
+    pub fn status(&self) -> UserStatus {
+        UserStatus::parse(&self.status)
+    }
 }
 
 impl From<UserRow> for User {
     fn from(r: UserRow) -> Self {
-        User { id: UserId(r.id), username: r.username, display_name: r.display_name, created_at: r.created_at }
+        User {
+            id: UserId(r.id),
+            username: r.username,
+            display_name: r.display_name,
+            created_at: r.created_at,
+            avatar_id: r.avatar_id.map(FileId),
+        }
     }
 }
 
@@ -36,6 +52,7 @@ pub struct GuildRow {
     pub icon_id: Option<Uuid>,
     pub afk_channel_id: Option<Uuid>,
     pub afk_timeout_minutes: i32,
+    pub audio_bitrate: i32,
 }
 
 impl From<GuildRow> for Guild {
@@ -48,6 +65,7 @@ impl From<GuildRow> for Guild {
             icon_id: r.icon_id.map(FileId),
             afk_channel_id: r.afk_channel_id.map(ChannelId),
             afk_timeout_minutes: r.afk_timeout_minutes.max(1) as u32,
+            audio_bitrate: r.audio_bitrate.max(8000) as u32,
         }
     }
 }
@@ -61,6 +79,7 @@ pub struct ChannelRow {
     pub position: i32,
     pub e2ee: bool,
     pub created_at: DateTime<Utc>,
+    pub category_id: Option<Uuid>,
 }
 
 impl ChannelRow {
@@ -82,7 +101,22 @@ impl From<ChannelRow> for Channel {
             name: r.name,
             position: r.position,
             e2ee: r.e2ee,
+            category_id: r.category_id.map(CategoryId),
         }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub struct CategoryRow {
+    pub id: Uuid,
+    pub guild_id: Uuid,
+    pub name: String,
+    pub position: i32,
+}
+
+impl From<CategoryRow> for Category {
+    fn from(r: CategoryRow) -> Self {
+        Category { id: CategoryId(r.id), guild_id: GuildId(r.guild_id), name: r.name, position: r.position }
     }
 }
 

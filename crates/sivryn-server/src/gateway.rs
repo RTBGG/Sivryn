@@ -93,17 +93,6 @@ impl Session {
     }
 }
 
-/// Tells friends and people sharing a guild or DM that `user` came or went.
-async fn announce_presence(state: &AppState, user_id: UserId, online: bool) {
-    match db::related_users(&state.db, user_id).await {
-        Ok(users) if !users.is_empty() => {
-            state.events.publish(Audience::Users(users), Event::PresenceUpdate { user_id, online });
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "could not announce presence"),
-    }
-}
-
 async fn send(socket: &mut (impl SinkExt<WsMessage> + Unpin), msg: &ServerMessage) -> anyhow::Result<()> {
     let text = serde_json::to_string(msg)?;
     socket.send(WsMessage::Text(text.into())).await.map_err(|_| anyhow::anyhow!("socket closed"))
@@ -146,7 +135,7 @@ async fn run(tx: &mut Tx, rx: &mut Rx, state: AppState) -> anyhow::Result<()> {
     let mut session = Session { user_id, device_id, guilds: guilds.iter().map(|g| g.id).collect() };
     send(tx, &ServerMessage::Ready { user: user.into(), guilds }).await?;
     if state.presence.connect(user_id) {
-        announce_presence(&state, user_id, true).await;
+        crate::routes::users::announce_presence(&state, user_id).await;
     }
 
     let mut last_heartbeat = Instant::now();
@@ -195,7 +184,7 @@ async fn run(tx: &mut Tx, rx: &mut Rx, state: AppState) -> anyhow::Result<()> {
     .await;
 
     if state.presence.disconnect(user_id) {
-        announce_presence(&state, user_id, false).await;
+        crate::routes::users::announce_presence(&state, user_id).await;
     }
     result
 }
@@ -242,6 +231,7 @@ mod tests {
             username: "me".into(),
             display_name: None,
             created_at: chrono::Utc::now(),
+            avatar_id: None,
         };
         assert!(s.accept(&env(Audience::Guild(g), Event::MemberJoin { guild_id: g, user })));
         assert!(s.accept(&env(Audience::Guild(g), deleted())));

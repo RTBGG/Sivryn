@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use sivryn_client_core::protocol::GuildId;
 use sivryn_client_core::protocol::media::{ContentHint, ScreenShareLimits};
+use sivryn_client_core::protocol::{CategoryId, GuildId};
 use sivryn_media::{AudioConfig, CameraQuality};
 
 use crate::hotkeys::Keybind;
@@ -34,6 +34,8 @@ pub struct Settings {
     pub member_list: bool,
     /// Attach previews of the first link to messages you send.
     pub link_previews: bool,
+    /// Folded channel categories.
+    pub collapsed_categories: std::collections::HashSet<CategoryId>,
     pub video: VideoSettings,
     pub keybinds: Keybinds,
     pub appearance: Appearance,
@@ -52,6 +54,7 @@ impl Default for Settings {
             muted_users: Default::default(),
             member_list: true,
             link_previews: true,
+            collapsed_categories: Default::default(),
             video: VideoSettings::default(),
             keybinds: Keybinds::default(),
             appearance: Appearance::default(),
@@ -66,10 +69,14 @@ pub struct VideoSettings {
     /// Camera name; `None` uses the first camera.
     pub camera: Option<String>,
     pub camera_quality: CameraQuality,
-    pub screen_quality: ScreenQuality,
+    /// Screen share resolution and frame rate (the last ones used).
+    pub screen_resolution: ScreenResolution,
+    pub screen_fps: u32,
     pub screen_hint: ContentHint,
     /// Share the shared window's (or the system's) sound along with the picture.
     pub screen_audio: bool,
+    /// The share picker's last tab: windows (`true`) or screens.
+    pub share_windows_tab: bool,
 }
 
 impl Default for VideoSettings {
@@ -77,50 +84,65 @@ impl Default for VideoSettings {
         Self {
             camera: None,
             camera_quality: CameraQuality::default(),
-            screen_quality: ScreenQuality::default(),
+            screen_resolution: ScreenResolution::default(),
+            screen_fps: 60,
             screen_hint: ContentHint::Detail,
             screen_audio: true,
+            share_windows_tab: false,
         }
     }
 }
 
-/// Screen share resolution and frame rate; the server's limits still apply.
+/// Screen share resolution; the server's limits still apply.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ScreenQuality {
-    P1080_30,
-    P1080_60,
+pub enum ScreenResolution {
+    P720,
     #[default]
-    P1440_60,
-    P2160_30,
+    P1080,
+    P1440,
+    P2160,
 }
 
-impl ScreenQuality {
-    pub const ALL: [ScreenQuality; 4] =
-        [ScreenQuality::P1080_30, ScreenQuality::P1080_60, ScreenQuality::P1440_60, ScreenQuality::P2160_30];
+/// Frame rates offered for screen sharing.
+pub const SCREEN_FPS: [u32; 3] = [15, 30, 60];
+
+impl ScreenResolution {
+    pub const ALL: [ScreenResolution; 4] =
+        [ScreenResolution::P720, ScreenResolution::P1080, ScreenResolution::P1440, ScreenResolution::P2160];
 
     pub fn label(self) -> &'static str {
         match self {
-            ScreenQuality::P1080_30 => "1080p · 30 fps",
-            ScreenQuality::P1080_60 => "1080p · 60 fps",
-            ScreenQuality::P1440_60 => "1440p · 60 fps",
-            ScreenQuality::P2160_30 => "4K · 30 fps",
+            ScreenResolution::P720 => "720p",
+            ScreenResolution::P1080 => "1080p",
+            ScreenResolution::P1440 => "1440p",
+            ScreenResolution::P2160 => "4K",
         }
     }
 
-    /// The server's limits narrowed to this preference.
-    pub fn apply(self, server: &ScreenShareLimits) -> ScreenShareLimits {
-        let (w, h, fps) = match self {
-            ScreenQuality::P1080_30 => (1920, 1080, 30),
-            ScreenQuality::P1080_60 => (1920, 1080, 60),
-            ScreenQuality::P1440_60 => (2560, 1440, 60),
-            ScreenQuality::P2160_30 => (3840, 2160, 30),
-        };
+    fn size(self) -> (u32, u32) {
+        match self {
+            ScreenResolution::P720 => (1280, 720),
+            ScreenResolution::P1080 => (1920, 1080),
+            ScreenResolution::P1440 => (2560, 1440),
+            ScreenResolution::P2160 => (3840, 2160),
+        }
+    }
+}
+
+impl VideoSettings {
+    /// The server's limits narrowed to the chosen resolution and frame rate.
+    pub fn screen_limits(&self, server: &ScreenShareLimits) -> ScreenShareLimits {
+        let (w, h) = self.screen_resolution.size();
         ScreenShareLimits {
             max_width: server.max_width.min(w),
             max_height: server.max_height.min(h),
-            max_fps: server.max_fps.min(fps),
+            max_fps: server.max_fps.min(self.screen_fps.max(1)),
             ..server.clone()
         }
+    }
+
+    pub fn screen_label(&self) -> String {
+        format!("{} · {} fps", self.screen_resolution.label(), self.screen_fps)
     }
 }
 
@@ -170,11 +192,13 @@ impl Default for Appearance {
 pub struct Notifications {
     /// Sound for messages in channels you're not looking at.
     pub message_sound: bool,
+    /// Windows notifications for new messages.
+    pub desktop: bool,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { message_sound: true }
+        Self { message_sound: true, desktop: true }
     }
 }
 
@@ -232,10 +256,15 @@ mod tests {
     #[test]
     fn screen_quality_respects_server_limits() {
         let server = ScreenShareLimits::default(); // 1440p60
-        let four_k = ScreenQuality::P2160_30.apply(&server);
+        let mut video =
+            VideoSettings { screen_resolution: ScreenResolution::P2160, screen_fps: 30, ..Default::default() };
+        let four_k = video.screen_limits(&server);
         assert_eq!((four_k.max_width, four_k.max_height, four_k.max_fps), (2560, 1440, 30));
-        let low = ScreenQuality::P1080_30.apply(&server);
-        assert_eq!((low.max_width, low.max_height, low.max_fps), (1920, 1080, 30));
+        video.screen_resolution = ScreenResolution::P720;
+        video.screen_fps = 15;
+        let low = video.screen_limits(&server);
+        assert_eq!((low.max_width, low.max_height, low.max_fps), (1280, 720, 15));
         assert_eq!(low.max_bitrate_bps, server.max_bitrate_bps);
+        assert_eq!(video.screen_label(), "720p · 15 fps");
     }
 }

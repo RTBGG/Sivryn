@@ -62,6 +62,8 @@ pub enum Icon {
     Upload,
     UserMinus,
     Users,
+    Folder,
+    BellOff,
 }
 
 /// Shapes in a 24×24 box, stroked with width 2 and round caps/joins.
@@ -219,6 +221,15 @@ fn shapes(icon: Icon) -> &'static [Shape] {
         Icon::UserMinus => {
             &[Path("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"), Circle(9.0, 7.0, 4.0), Path("M22 11h-6")]
         }
+        Icon::Folder => &[Path(
+            "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
+        )],
+        Icon::BellOff => &[
+            Path("M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"),
+            Path("M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"),
+            Path("M10.3 21a1.94 1.94 0 0 0 3.4 0"),
+            Path("m2 2 20 20"),
+        ],
         Icon::Users => &[
             Path("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"),
             Circle(9.0, 7.0, 4.0),

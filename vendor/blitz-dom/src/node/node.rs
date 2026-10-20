@@ -760,7 +760,15 @@ impl Node {
                     let layout = &element_data.inline_layout_data.as_ref().unwrap().layout;
                     let scale = layout.scale();
 
-                    Cluster::from_point(layout, x * scale, y * scale).and_then(|(cluster, _)| {
+                    // Sivryn patch: `Cluster::from_point` snaps to the nearest
+                    // glyph, so a click in the empty rest of a line hit the
+                    // last word (e.g. a link). Only count points on the text.
+                    let (px, py) = (x * scale, y * scale);
+                    let on_text = layout.lines().any(|line| {
+                        let m = line.metrics();
+                        py >= m.min_coord && py <= m.max_coord && px >= m.offset && px <= m.offset + m.advance
+                    });
+                    Cluster::from_point(layout, px, py).filter(|_| on_text).and_then(|(cluster, _)| {
                         let style_index = cluster.glyphs().next()?.style_index();
                         let node_id = layout.styles()[style_index].brush.id;
                         Some(HitResult { node_id, x, y })

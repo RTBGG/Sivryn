@@ -95,7 +95,13 @@ pub fn mime_for(name: &str) -> &'static str {
 
 /// Reads a file and, for images, notes its size and makes a placeholder.
 pub fn prepare(name: String, bytes: Vec<u8>) -> PendingFile {
-    let mime = mime_for(&name).to_owned();
+    let mut mime = mime_for(&name).to_owned();
+    // Without a telling extension (e.g. a link preview), look at the content.
+    if mime == "application/octet-stream"
+        && let Ok(format) = image::guess_format(&bytes)
+    {
+        mime = format.to_mime_type().to_owned();
+    }
     let mut file = PendingFile { name, mime, bytes: Arc::new(bytes), width: None, height: None, thumbnail: None };
     if file.is_image()
         && let Ok(img) = image::load_from_memory(&file.bytes)
@@ -172,24 +178,91 @@ fn cache() -> &'static SharedCache {
     CACHE.get_or_init(|| SharedCache(Mutex::new(Cache { files: HashMap::new(), order: Vec::new(), bytes: 0 })))
 }
 
-/// Downloads and decrypts an attachment (cached in memory).
+/// Files kept on disk at most, so nothing is downloaded twice.
+const DISK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// `%LOCALAPPDATA%\Sivryn\cache\files`. File IDs never change content, so
+/// cached files never go stale. Attachments are stored as the server has
+/// them, encrypted; their keys only live in the (encrypted) message store.
+fn disk_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("XDG_CACHE_HOME"))?;
+    Some(std::path::PathBuf::from(base).join("Sivryn").join("cache").join("files"))
+}
+
+async fn disk_read(file: FileId) -> Option<Vec<u8>> {
+    let path = disk_dir()?.join(file.to_string());
+    let data = tokio::fs::read(&path).await.ok()?;
+    // Touch it, so pruning keeps recently used files.
+    let _ =
+        std::fs::File::options().append(true).open(&path).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    Some(data)
+}
+
+async fn disk_write(file: FileId, data: &[u8]) {
+    let Some(dir) = disk_dir() else { return };
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return;
+    }
+    // Write to a temporary name first, so a crash never leaves half a file.
+    let tmp = dir.join(format!("{file}.part"));
+    if tokio::fs::write(&tmp, data).await.is_ok() {
+        let _ = tokio::fs::rename(&tmp, dir.join(file.to_string())).await;
+    }
+}
+
+/// Deletes the least recently used cached files above the size limit.
+pub fn prune_disk_cache() {
+    let Some(dir) = disk_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, meta.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort_by_key(|f| f.0);
+    for (_, len, path) in files {
+        if total <= DISK_CACHE_BYTES {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
+}
+
+/// The file's bytes as the server stores them: memory and disk cache first.
+async fn download(s: &Session, file: FileId) -> Result<Vec<u8>, String> {
+    if let Some(data) = disk_read(file).await {
+        return Ok(data);
+    }
+    let data = s.api.download_file(file).await.map_err(|e| e.to_string())?;
+    disk_write(file, &data).await;
+    Ok(data)
+}
+
+/// Downloads and decrypts an attachment (cached in memory and on disk).
 pub async fn fetch(s: &Session, attachment: &Attachment) -> Result<Arc<Vec<u8>>, String> {
     if let Some(data) = cache().get(attachment.file_id) {
         return Ok(data);
     }
-    let sealed = s.api.download_file(attachment.file_id).await.map_err(|e| e.to_string())?;
-    let plain = decrypt(&attachment.key, &sealed)?;
+    let sealed = download(s, attachment.file_id).await?;
+    let key = attachment.key.clone();
+    let plain = tokio::task::spawn_blocking(move || decrypt(&key, &sealed)).await.map_err(|e| e.to_string())??;
     let data = Arc::new(plain);
     cache().put(attachment.file_id, data.clone());
     Ok(data)
 }
 
-/// Downloads a public, unencrypted file such as a server icon (cached).
+/// Downloads a public, unencrypted file such as a server icon or avatar
+/// (cached in memory and on disk).
 pub async fn fetch_plain(s: &Session, file: FileId) -> Result<Arc<Vec<u8>>, String> {
     if let Some(data) = cache().get(file) {
         return Ok(data);
     }
-    let data = Arc::new(s.api.download_file(file).await.map_err(|e| e.to_string())?);
+    let data = Arc::new(download(s, file).await?);
     cache().put(file, data.clone());
     Ok(data)
 }
@@ -250,6 +323,43 @@ pub fn decode(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Decoded, String> {
     let img = image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?.to_rgba8();
     let (width, height) = img.dimensions();
     Ok(Decoded { width, height, frames: vec![(to_frame(fit(img)), Duration::ZERO)] })
+}
+
+/// Prepares a profile picture (256 px square) or banner (960×340) for
+/// upload, cropped to fill. Small animated GIFs are kept as they are.
+/// Returns the content type and the bytes.
+pub fn profile_image(bytes: &[u8], banner: bool) -> Result<(&'static str, Vec<u8>), String> {
+    let format = image::guess_format(bytes).map_err(|_| "not an image".to_string())?;
+    if format == image::ImageFormat::Gif && bytes.len() <= 4 * 1024 * 1024 {
+        return Ok(("image/gif", bytes.to_vec()));
+    }
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let (w, h) = if banner { (960, 340) } else { (256, 256) };
+    let filled = img.resize_to_fill(w, h, image::imageops::FilterType::Lanczos3);
+    let mut out = Vec::new();
+    filled.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok(("image/png", out))
+}
+
+/// Makes everything outside the inscribed circle transparent (avatars).
+pub fn round(decoded: &mut Decoded) {
+    for (frame, _) in &mut decoded.frames {
+        let f = Arc::make_mut(frame);
+        let (w, h) = (f.width as f32, f.height as f32);
+        let r = w.min(h) / 2.0;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        for y in 0..f.height {
+            for x in 0..f.width {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                // One pixel of anti-aliasing at the edge.
+                let coverage = (r - d + 0.5).clamp(0.0, 1.0);
+                if coverage < 1.0 {
+                    let i = ((y * f.width + x) * 4 + 3) as usize;
+                    f.data[i] = (f.data[i] as f32 * coverage) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// Shows a decoded image through a `watch` channel, like a video feed:
@@ -334,6 +444,10 @@ mod tests {
         assert_eq!((decoded.frames[0].0.width, decoded.frames[0].0.height), (150, 100));
         assert_eq!(mime_for("clip.mp4"), "video/mp4");
         assert_eq!(mime_for("noext"), "application/octet-stream");
+
+        // Images without an extension (link previews) are recognized by content.
+        let preview = prepare("preview".into(), png);
+        assert_eq!((preview.mime.as_str(), preview.width), ("image/png", Some(300)));
     }
 
     #[test]

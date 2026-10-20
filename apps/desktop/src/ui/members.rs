@@ -1,16 +1,19 @@
 //! Member list on the right: online and offline, alphabetical, collapsible.
 
 use dioxus_native::prelude::*;
-use sivryn_client_core::protocol::ChannelId;
-use sivryn_client_core::protocol::model::User;
+use sivryn_client_core::protocol::model::UserStatus;
+use sivryn_client_core::protocol::{ChannelId, UserId};
 
 use super::icons::{Icon, Svg};
-use super::widgets::Avatar;
+use super::widgets::{Avatar, StatusDot};
 use super::{AppState, Modal, menu};
 use crate::i18n::t;
 
-fn display_name(u: &User) -> String {
-    u.display_name.clone().unwrap_or_else(|| u.username.clone())
+#[derive(Clone, PartialEq)]
+struct Row {
+    id: UserId,
+    name: String,
+    status: Option<UserStatus>,
 }
 
 #[component]
@@ -19,19 +22,18 @@ pub fn MemberList(channel: ChannelId) -> Element {
     let mut online_open = use_signal(|| true);
     let mut offline_open = use_signal(|| true);
     let guild = state.guild_of(channel);
-    let members: Vec<User> = match guild {
-        Some(g) => state.members.read().get(&g).cloned().unwrap_or_default(),
-        None => state.dm(channel).map(|d| d.members).unwrap_or_default(),
+    let ids: Vec<UserId> = match guild {
+        Some(g) => state.members.read().get(&g).map(|l| l.iter().map(|m| m.user.id).collect()).unwrap_or_default(),
+        None => state.dm(channel).map(|d| d.members.iter().map(|u| u.id).collect()).unwrap_or_default(),
     };
-    let online_set = state.online.read();
     let owner = guild.and_then(|g| state.guild(g)).map(|g| g.owner_id);
-    let sort = |mut list: Vec<User>| {
-        list.sort_by_key(|u| display_name(u).to_lowercase());
-        list
-    };
-    let (online, offline): (Vec<User>, Vec<User>) = members.into_iter().partition(|u| online_set.contains(&u.id));
-    let (online, offline) = (sort(online), sort(offline));
-    drop(online_set);
+    let mut rows: Vec<Row> = ids
+        .into_iter()
+        .map(|id| Row { id, name: state.display_name_in(guild, id), status: state.status_of(id) })
+        .collect();
+    rows.sort_by_key(|r| r.name.to_lowercase());
+    let (online, offline): (Vec<Row>, Vec<Row>) =
+        rows.into_iter().partition(|r| r.status.is_some_and(|s| s != UserStatus::Invisible));
 
     rsx! {
         aside { class: "member-list",
@@ -42,8 +44,8 @@ pub fn MemberList(channel: ChannelId) -> Element {
                 "{t(\"members.online\")} — {online.len()}"
             }
             if *online_open.read() {
-                for u in online {
-                    MemberRow { key: "{u.id}", user: u.clone(), online: true, owner: owner == Some(u.id), channel }
+                for r in online {
+                    MemberRow { key: "{r.id}", row: r.clone(), owner: owner == Some(r.id), channel }
                 }
             }
             div {
@@ -53,8 +55,8 @@ pub fn MemberList(channel: ChannelId) -> Element {
                 "{t(\"members.offline\")} — {offline.len()}"
             }
             if *offline_open.read() {
-                for u in offline {
-                    MemberRow { key: "{u.id}", user: u.clone(), online: false, owner: owner == Some(u.id), channel }
+                for r in offline {
+                    MemberRow { key: "{r.id}", row: r.clone(), owner: owner == Some(r.id), channel }
                 }
             }
         }
@@ -62,25 +64,30 @@ pub fn MemberList(channel: ChannelId) -> Element {
 }
 
 #[component]
-fn MemberRow(user: User, online: bool, owner: bool, channel: ChannelId) -> Element {
+fn MemberRow(row: Row, owner: bool, channel: ChannelId) -> Element {
     let mut state = use_context::<AppState>();
-    let name = display_name(&user);
-    let id = user.id;
+    let id = row.id;
+    let online = row.status.is_some_and(|s| s != UserStatus::Invisible);
     rsx! {
         div {
             class: if online { "member" } else { "member offline" },
             onclick: move |_| state.modal.set(Some(Modal::Profile(id))),
             onmousedown: move |e| {
                 if let Some((x, y)) = menu::right_click(&e) {
-                    let voice = state.call.peek().as_ref().filter(|c| c.participants.iter().any(|p| p.identity == id.to_string())).map(|c| c.channel);
+                    let voice = state
+                        .call
+                        .peek()
+                        .as_ref()
+                        .filter(|c| c.participants.iter().any(|p| p.identity == id.to_string()))
+                        .map(|c| c.channel);
                     menu::open(state, x, y, menu::user_items(state, id, state.guild_of(channel), voice));
                 }
             },
             div { class: "member-avatar",
-                Avatar { name: name.clone(), id: Some(id), size: 32 }
-                div { class: if online { "presence-dot online" } else { "presence-dot" } }
+                Avatar { name: row.name.clone(), id: Some(id), size: 32 }
+                StatusDot { status: row.status.filter(|_| online) }
             }
-            span { class: "member-name", "{name}" }
+            span { class: "member-name", "{row.name}" }
             if owner {
                 span { class: "owner-badge", title: t("members.owner"), Svg { icon: Icon::ShieldCheck, size: 14 } }
             }

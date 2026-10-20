@@ -16,6 +16,7 @@ pub mod codec;
 pub mod player;
 pub mod screen;
 pub mod screen_audio;
+pub mod thumbnails;
 pub mod video;
 
 pub use audio::{AudioConfig, AudioDevice, AudioEngine, NoiseSuppression, Sound, VoiceMode};
@@ -25,6 +26,7 @@ pub use livekit::prelude::TrackSource;
 pub use player::MediaPlayer;
 pub use screen::{ScreenShare, ScreenSource, SourceKind, list_sources};
 pub use screen_audio::{LoopbackTarget, ScreenAudio, window_process};
+pub use thumbnails::{SourcePreviews, Thumbnail};
 pub use video::{RgbaFrame, VideoFeed};
 
 /// Whether Windows Media Foundation is installed. "N" editions of Windows

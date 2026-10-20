@@ -12,6 +12,8 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/render.rs`: `<input type="password">` is painted as evenly spaced dots, with caret
   and selection drawn at the dot positions (`draw_password_input`). Upstream has no
   password masking yet. Mouse hit-testing still uses the real glyph positions.
+- `src/render.rs` (`draw_border_edge`): edges without a border width are skipped. Filling the
+  empty edge shape still drew a faint anti-aliased hairline along borderless elements.
 - `src/text.rs`: text baselines are snapped to whole device pixels so hinted glyphs land on
   the pixel grid; fractional baselines made text look blurry at 100 % display scaling.
 
@@ -22,6 +24,9 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/caret.rs` (+ `document.rs`, `events/keyboard.rs`, `events/mouse.rs`, and
   `blitz-paint/src/render.rs`): the text caret blinks at the Windows rate (530 ms) and
   restarts visible on typing and clicks. The app schedules a repaint at each toggle.
+- `src/bundled_fonts.rs` (+ `document.rs`, `lib.rs`): apps register their bundled font files
+  before creating a document. Blitz only loads `@font-face` from external stylesheets and
+  ignored the rules in Dioxus' inline `<style>` blocks, so Inter and Twemoji were never used.
 - `src/text_selection.rs` (+ `events/mod.rs`, `events/keyboard.rs`, `lib.rs` and
   `blitz-paint/src/render.rs`): static text inside an element with the class `selectable` can
   be selected with the mouse (drag, double-click for a word, triple-click for a line) and
@@ -31,11 +36,23 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/node/node.rs` (`Node::hit`): a node's own box is hit-tested before its scroll offset is
   applied, and content overflowing a clipping box is ignored. Upstream added the offset first,
   so clicks above or beside a scrolled container landed on its hidden, scrolled-away children.
+  Inline text only counts as hit where a line actually has text: `Cluster::from_point` snaps
+  to the nearest glyph, so a click in the empty rest of a line opened the link at its end.
+- `src/zoom_anchor.rs` (+ `document.rs`, `lib.rs`): a scroll container with a `data-zoom`
+  attribute (the current scale) keeps the point in its middle in place when the scale changes,
+  instead of zoomed content growing from the top left corner (image viewer).
 
 ## blitz-shell 0.2.3
 
 - `src/file_drop.rs`, `src/window.rs`: files dragged onto the window are forwarded to a
   handler the app installs (`blitz_shell::file_drop::set_handler`); Blitz ignored them.
+- `src/scrolling.rs`, `src/window.rs`: browser-like wheel scrolling (100 px per notch, eased
+  over ~45 ms instead of jumping), middle-click autoscroll (speed grows with the distance from
+  where it started; any click ends it) and Ctrl+wheel going to an app handler
+  (`blitz_shell::scrolling::set_ctrl_wheel_handler`) instead of zooming the page.
+- `src/escape.rs`, `src/window.rs`: Escape goes to an app handler first
+  (`blitz_shell::escape::set_escape_handler`). Key events only reach the focused element, so
+  overlays without a focused child (image viewer, settings) never saw Escape.
 
 ## sonora-agc2 0.2.0 and sonora-common-audio 0.2.0
 

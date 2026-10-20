@@ -1,6 +1,7 @@
 //! Images, animations, videos and files in the chat, and the full-size viewer.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
@@ -10,7 +11,7 @@ use sivryn_media::{MediaPlayer, RgbaFrame};
 use tokio::sync::watch;
 
 use super::icons::{Icon, Svg};
-use super::{AppState, Services, ViewerImage};
+use super::{AppState, Services, ViewerImage, menu};
 use crate::files;
 use crate::i18n::t;
 use crate::video_surface::VideoSurface;
@@ -48,9 +49,20 @@ pub fn FrameCanvas(frames: Frames, #[props(default)] class: String) -> Element {
 /// An image attachment: placeholder first, then the decrypted image.
 /// Click opens the viewer.
 #[component]
-pub fn ImageAttachment(attachment: Attachment, #[props(default)] url: Option<String>) -> Element {
+pub fn ImageAttachment(
+    attachment: Attachment,
+    #[props(default)] url: Option<String>,
+    /// Inside a link preview, which is a little narrower.
+    #[props(default)]
+    in_embed: bool,
+) -> Element {
     let state = use_context::<AppState>();
-    let (w, h) = chat_size(attachment.width.unwrap_or(0), attachment.height.unwrap_or(0));
+    let (mut w, mut h) = chat_size(attachment.width.unwrap_or(0), attachment.height.unwrap_or(0));
+    if in_embed && w > 400 {
+        h = h * 400 / w;
+        w = 400;
+    }
+    let menu_attachment = attachment.clone();
     let mut frames = use_signal(|| None::<watch::Receiver<Option<Arc<RgbaFrame>>>>);
     let mut failed = use_signal(|| false);
     let placeholder = use_hook(|| files::thumbnail(&attachment).map(|f| watch::channel(Some(f)).1));
@@ -94,6 +106,12 @@ pub fn ImageAttachment(attachment: Attachment, #[props(default)] url: Option<Str
 
     rsx! {
         div { class: "chat-image", style: "width: {w}px; height: {h}px;", title: "{title}", onclick: open,
+            onmousedown: move |e| {
+                if let Some((x, y)) = menu::right_click(&e) {
+                    e.stop_propagation();
+                    menu::open(state, x, y, menu::image_items(&menu_attachment));
+                }
+            },
             for (key, f, class) in shown.clone() {
                 FrameCanvas { key: "{key}", frames: Frames(f), class }
             }
@@ -128,6 +146,8 @@ fn open_viewer(mut state: AppState, attachment: Attachment, url: Option<String>)
                     height,
                     name: attachment.name.clone(),
                     url,
+                    zoom: None,
+                    attachment: Some(attachment.clone()),
                 }));
             }
             Ok(Err(e)) => state.report(Err(e)),
@@ -136,24 +156,58 @@ fn open_viewer(mut state: AppState, attachment: Attachment, url: Option<String>)
     });
 }
 
-/// Full-size image over everything. It opens at most at its natural size;
-/// a click zooms to 100 % (or 2× for small images), another click zooms out.
+/// Set while the image viewer is open, so Ctrl+wheel zooms instead of scrolling.
+pub static VIEWER_OPEN: AtomicBool = AtomicBool::new(false);
+/// Largest zoom, relative to the image's own size.
+const MAX_ZOOM: f64 = 4.0;
+/// Zoom change per wheel notch.
+const ZOOM_STEP: f64 = 1.25;
+
+/// The scale that fits the image into the window with some margin, but
+/// never above 100 %.
+fn base_scale(w: u32, h: u32) -> f64 {
+    let (vw, vh) = crate::window::client_size().unwrap_or((1280.0, 800.0));
+    ((vw - 48.0) / w.max(1) as f64).min((vh - 100.0) / h.max(1) as f64).min(1.0)
+}
+
+/// Ctrl+wheel in the viewer: zoom between the fitted size and 400 %.
+pub fn wheel_zoom(mut state: AppState, notches: f64) {
+    let mut viewer = state.viewer.write();
+    let Some(image) = viewer.as_mut() else { return };
+    let base = base_scale(image.width, image.height);
+    let current = image.zoom.unwrap_or(base);
+    let next = (current * ZOOM_STEP.powf(notches)).clamp(base, MAX_ZOOM);
+    image.zoom = if (next - base).abs() < 1e-3 { None } else { Some(next) };
+}
+
+/// Full-size image over everything. It opens at most at its natural size
+/// (smaller when it doesn't fit the window). A click zooms to 100 % (2× for
+/// small images) and back; Ctrl+wheel zooms between that and 400 %.
 #[component]
 pub fn ImageViewer() -> Element {
     let mut state = use_context::<AppState>();
-    let mut zoomed = use_signal(|| false);
+    use_hook(|| VIEWER_OPEN.store(true, Ordering::Relaxed));
+    use_drop(|| VIEWER_OPEN.store(false, Ordering::Relaxed));
     let Some(image) = state.viewer.read().clone() else { return rsx! {} };
     let (w, h) = (image.width.max(1), image.height.max(1));
-    let zoom = *zoomed.read();
-    // CSS pixels; the window is roughly 1280×800 by default, the stage clips.
-    let (dw, dh) = if zoom {
-        if w < 600 && h < 600 { (w * 2, h * 2) } else { (w, h) }
-    } else {
-        // Fit the window (minus margins and the bar), never enlarge.
-        let (vw, vh) = crate::window::client_size().unwrap_or((1280.0, 800.0));
-        let scale = ((vw - 48.0) / w as f64).min((vh - 100.0) / h as f64).min(1.0);
-        (((w as f64) * scale) as u32, ((h as f64) * scale) as u32)
+    let base = base_scale(w, h);
+    let scale = image.zoom.unwrap_or(base);
+    let zoomed = scale > base + 1e-3;
+    let (dw, dh) = ((w as f64 * scale) as u32, (h as f64 * scale) as u32);
+    let percent = (scale * 100.0).round();
+    let toggle = move |e: MouseEvent| {
+        e.stop_propagation();
+        let mut viewer = state.viewer.write();
+        if let Some(image) = viewer.as_mut() {
+            image.zoom = if image.zoom.is_some() {
+                None
+            } else {
+                let natural: f64 = if w < 600 && h < 600 { 2.0 } else { 1.0 };
+                Some(natural.max(base * 2.0).min(MAX_ZOOM))
+            };
+        }
     };
+    let attachment = image.attachment.clone();
 
     rsx! {
         div { class: "viewer",
@@ -163,20 +217,25 @@ pub fn ImageViewer() -> Element {
                     state.viewer.set(None);
                 }
             },
-            div { class: if zoom { "viewer-stage zoomed" } else { "viewer-stage" },
+            // `data-zoom`: zooming keeps the middle of the view in place.
+            div { class: if zoomed { "viewer-stage zoomed" } else { "viewer-stage" }, "data-zoom": "{scale}",
                 div {
-                    class: if zoom { "viewer-image zoom-out" } else { "viewer-image zoom-in" },
-                    style: "width: {dw}px; height: {dh}px; min-width: {dw}px;",
-                    onclick: move |e| {
-                        e.stop_propagation();
-                        zoomed.toggle();
+                    class: if zoomed { "viewer-image zoom-out" } else { "viewer-image zoom-in" },
+                    style: "width: {dw}px; height: {dh}px; min-width: {dw}px; min-height: {dh}px;",
+                    onclick: toggle,
+                    onmousedown: move |e| {
+                        if let (Some((x, y)), Some(a)) = (menu::right_click(&e), attachment.as_ref()) {
+                            e.stop_propagation();
+                            menu::open(state, x, y, menu::image_items(a));
+                        }
                     },
                     FrameCanvas { frames: Frames(image.frames.clone()) }
                 }
             }
             div { class: "viewer-bar", onclick: move |e| e.stop_propagation(),
                 span { class: "viewer-name", "{image.name}" }
-                span { class: "muted", "{image.width} × {image.height}" }
+                span { class: "muted", "{image.width} × {image.height} · {percent} %" }
+                span { class: "muted small", {t("media.zoom_hint")} }
                 if let Some(url) = image.url.clone() {
                     span { class: "link", onclick: move |_| files::open_link(&url), {t("media.open_original")} }
                 }
@@ -348,17 +407,22 @@ pub fn EmbedView(embed: Embed) -> Element {
     let url = embed.url.clone();
     rsx! {
         div { class: "embed",
-            if let Some(site) = embed.site_name.clone() {
-                div { class: "embed-site", "{site}" }
-            }
-            if let Some(title) = embed.title.clone() {
-                div { class: "embed-title link", onclick: move |_| files::open_link(&url), "{title}" }
-            }
-            if let Some(description) = embed.description.clone() {
-                div { class: "embed-description", "{description}" }
-            }
-            if let Some(image) = embed.image.clone() {
-                div { class: "embed-image", ImageAttachment { attachment: image } }
+            div { class: "embed-bar" }
+            div { class: "embed-content",
+                if let Some(site) = embed.site_name.clone() {
+                    div { class: "embed-site selectable", "{site}" }
+                }
+                if let Some(title) = embed.title.clone() {
+                    div { class: "embed-title selectable",
+                        span { class: "link", onclick: move |_| files::open_link(&url), "{title}" }
+                    }
+                }
+                if let Some(description) = embed.description.clone() {
+                    div { class: "embed-description selectable", "{description}" }
+                }
+                if let Some(image) = embed.image.clone() {
+                    div { class: "embed-image", ImageAttachment { attachment: image, in_embed: true } }
+                }
             }
         }
     }
