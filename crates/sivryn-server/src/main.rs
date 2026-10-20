@@ -26,7 +26,7 @@ async fn serve() -> anyhow::Result<()> {
     let events = event_bus(&config).await?;
 
     let bind = config.bind;
-    let app = router(AppState { db, config: Arc::new(config), events });
+    let app = router(AppState { db, config: Arc::new(config), events, presence: Default::default() });
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "sivryn-server listening");

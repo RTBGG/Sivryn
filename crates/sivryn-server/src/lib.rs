@@ -20,7 +20,9 @@ mod db;
 mod error;
 pub mod events;
 mod gateway;
+pub mod presence;
 mod routes;
+mod storage;
 
 use config::Config;
 use events::EventBus;
@@ -30,6 +32,7 @@ pub struct AppState {
     pub db: sqlx::PgPool,
     pub config: Arc<Config>,
     pub events: EventBus,
+    pub presence: presence::Presence,
 }
 
 /// Connects to PostgreSQL and applies pending migrations.
@@ -75,7 +78,7 @@ fn install_crypto_provider() {
 pub fn router(state: AppState) -> Router {
     install_crypto_provider();
     Router::new()
-        .nest("/api/v1", routes::api())
+        .nest("/api/v1", routes::api(state.config.max_upload_bytes))
         .route("/gateway", get(gateway::handler))
         .route("/healthz", get(|| async { "ok" }))
         .layer(CompressionLayer::new())

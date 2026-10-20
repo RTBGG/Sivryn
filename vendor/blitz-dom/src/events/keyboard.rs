@@ -27,10 +27,17 @@ pub(crate) fn handle_keypress<F: FnMut(DomEvent)>(
         return;
     }
 
+    // Sivryn patch: Ctrl+C copies selected static text.
+    if crate::text_selection::handle_copy(doc, &event) {
+        return;
+    }
+
     if let Some(node_id) = doc.focus_node_id {
         if target != node_id {
             return;
         }
+        // Sivryn patch: keep the caret visible while typing.
+        crate::caret::reset();
 
         let node = &mut doc.nodes[node_id];
         let Some(element_data) = node.element_data_mut() else {

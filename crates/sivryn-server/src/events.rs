@@ -5,7 +5,7 @@
 //! and every instance forwards what it receives into its local channel, so
 //! clients on any instance see every event.
 
-use sivryn_protocol::gateway::Event;
+use sivryn_protocol::gateway::{Audience, Envelope, Event};
 use tokio::sync::broadcast;
 
 const LOCAL_CAPACITY: usize = 4096;
@@ -14,7 +14,7 @@ const SUBJECT: &str = "sivryn.events";
 
 #[derive(Clone)]
 pub struct EventBus {
-    local: broadcast::Sender<Event>,
+    local: broadcast::Sender<Envelope>,
     #[cfg(feature = "nats")]
     nats: Option<async_nats::Client>,
 }
@@ -40,7 +40,7 @@ impl EventBus {
         let forward = local.clone();
         tokio::spawn(async move {
             while let Some(msg) = subscriber.next().await {
-                match serde_json::from_slice::<Event>(&msg.payload) {
+                match serde_json::from_slice::<Envelope>(&msg.payload) {
                     Ok(event) => {
                         // No receivers is fine: nobody is connected to this instance.
                         let _ = forward.send(event);
@@ -54,7 +54,9 @@ impl EventBus {
         Ok(Self { local, nats: Some(client) })
     }
 
-    pub fn publish(&self, event: Event) {
+    /// Sends `event` to everyone in `to` (on every instance, with NATS).
+    pub fn publish(&self, to: Audience, event: Event) {
+        let event = Envelope { to, event };
         #[cfg(feature = "nats")]
         if let Some(client) = &self.nats {
             let client = client.clone();
@@ -73,7 +75,7 @@ impl EventBus {
         let _ = self.local.send(event);
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
         self.local.subscribe()
     }
 }

@@ -222,6 +222,13 @@ impl MlsDevice {
         self.groups.get(&channel).map(|g| g.epoch().as_u64())
     }
 
+    /// A group this device created that nobody else has joined yet (epoch 0,
+    /// only us). Two devices can create the same channel's group at once;
+    /// the loser's provisional group gives way to the winner's welcome.
+    pub fn is_provisional(&self, channel: ChannelId) -> bool {
+        self.groups.get(&channel).is_some_and(|g| g.epoch().as_u64() == 0 && g.members().count() == 1)
+    }
+
     /// Forgets a channel's group, e.g. after losing the race to create it.
     pub fn remove_group(&mut self, channel: ChannelId) {
         if let Some(mut group) = self.groups.remove(&channel) {
@@ -279,6 +286,52 @@ impl MlsDevice {
         })
     }
 
+    /// Users (by identity, i.e. user ID) with devices in the channel's group.
+    pub fn member_identities(&self, channel: ChannelId) -> Vec<String> {
+        let Some(group) = self.groups.get(&channel) else { return Vec::new() };
+        let mut out: Vec<String> = group
+            .members()
+            .filter_map(|m| BasicCredential::try_from(m.credential).ok())
+            .map(|c| String::from_utf8_lossy(c.identity()).into_owned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Removes every device of the given identities from the group (after a
+    /// kick, ban or leaving a group DM). `None` if none of them is a member.
+    pub fn remove_identities(
+        &mut self,
+        channel: ChannelId,
+        identities: &[String],
+    ) -> Result<Option<PendingCommit>, CryptoError> {
+        let provider = &self.provider;
+        let signer = &self.signer;
+        let group = self.groups.get_mut(&channel).ok_or(CryptoError::UnknownChannel(channel))?;
+        let own = group.own_leaf_index();
+        let leaves: Vec<LeafNodeIndex> = group
+            .members()
+            .filter(|m| m.index != own)
+            .filter(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .is_ok_and(|c| identities.iter().any(|id| id.as_bytes() == c.identity()))
+            })
+            .map(|m| m.index)
+            .collect();
+        if leaves.is_empty() {
+            return Ok(None);
+        }
+        let epoch = group.epoch().as_u64();
+        let (commit, _welcome, _info) = group.remove_members(provider, signer, &leaves).map_err(mls_err)?;
+        Ok(Some(PendingCommit {
+            epoch,
+            commit: encode(&commit)?,
+            welcome: None,
+            ratchet_tree: encode(&group.export_ratchet_tree())?,
+        }))
+    }
+
     /// The server accepted our commit: apply it locally.
     pub fn confirm_commit(&mut self, channel: ChannelId) -> Result<u64, CryptoError> {
         let provider = &self.provider;
@@ -302,6 +355,10 @@ impl MlsDevice {
             _ => return Err(CryptoError::Encoding("not a welcome message".into())),
         };
         let tree = RatchetTreeIn::tls_deserialize(&mut decode(ratchet_tree)?.as_slice()).map_err(mls_err)?;
+        // Our own group lost the race to another device's: theirs counts.
+        if self.is_provisional(channel) {
+            self.remove_group(channel);
+        }
         let group = StagedWelcome::new_from_welcome(&self.provider, &join_config(), welcome, Some(tree))
             .map_err(mls_err)?
             .into_group(&self.provider)
@@ -362,7 +419,7 @@ mod tests {
     use super::*;
 
     fn content(body: &str) -> MessageContent {
-        MessageContent { body: body.into(), reply_to: None }
+        MessageContent { body: body.into(), ..Default::default() }
     }
 
     #[test]
@@ -391,6 +448,29 @@ mod tests {
         assert!(matches!(alice.process(channel, &reply).unwrap(), Incoming::Message(m) if m.body == "hi alice"));
 
         assert_eq!(alice.media_key(channel).unwrap(), bob.media_key(channel).unwrap());
+    }
+
+    #[test]
+    fn losing_the_race_to_create_a_group_still_joins() {
+        let channel = ChannelId::new();
+        let mut alice = MlsDevice::new("alice:1").unwrap();
+        let mut bob = MlsDevice::new("bob:1").unwrap();
+
+        // Both create the channel's group and try to add each other.
+        alice.create_group(channel).unwrap();
+        bob.create_group(channel).unwrap();
+        let from_alice = alice.add_members(channel, &bob.key_packages(1).unwrap()).unwrap();
+        let _from_bob = bob.add_members(channel, &alice.key_packages(1).unwrap()).unwrap();
+        assert!(bob.is_provisional(channel));
+
+        // Alice's commit wins; her welcome reaches Bob before his rejection.
+        alice.confirm_commit(channel).unwrap();
+        assert!(!alice.is_provisional(channel));
+        assert_eq!(bob.join(channel, from_alice.welcome.as_deref().unwrap(), &from_alice.ratchet_tree).unwrap(), 1);
+        assert!(!bob.is_provisional(channel), "the joined group must survive Bob's rejected commit");
+
+        let (_, ciphertext) = alice.encrypt(channel, &content("made it")).unwrap();
+        assert!(matches!(bob.process(channel, &ciphertext).unwrap(), Incoming::Message(m) if m.body == "made it"));
     }
 
     #[test]
@@ -437,6 +517,32 @@ mod tests {
         alice.confirm_commit(channel).unwrap();
         assert!(matches!(bob.process(channel, &add.commit).unwrap(), Incoming::EpochChanged { epoch: 2 }));
         assert!(matches!(bob.process(channel, &old).unwrap(), Incoming::Message(m) if m.body == "before carol"));
+    }
+
+    #[test]
+    fn removed_members_can_no_longer_read() {
+        let channel = ChannelId::new();
+        let mut alice = MlsDevice::new("alice").unwrap();
+        let mut bob = MlsDevice::new("bob").unwrap();
+        let mut carol = MlsDevice::new("carol").unwrap();
+        alice.create_group(channel).unwrap();
+        let kps = [bob.key_packages(1).unwrap(), carol.key_packages(1).unwrap()].concat();
+        let add = alice.add_members(channel, &kps).unwrap();
+        alice.confirm_commit(channel).unwrap();
+        bob.join(channel, add.welcome.as_deref().unwrap(), &add.ratchet_tree).unwrap();
+        carol.join(channel, add.welcome.as_deref().unwrap(), &add.ratchet_tree).unwrap();
+        assert_eq!(alice.member_identities(channel), ["alice", "bob", "carol"]);
+
+        let remove = alice.remove_identities(channel, &["carol".into()]).unwrap().unwrap();
+        alice.confirm_commit(channel).unwrap();
+        assert!(matches!(bob.process(channel, &remove.commit).unwrap(), Incoming::EpochChanged { .. }));
+        assert_eq!(alice.member_identities(channel), ["alice", "bob"]);
+        assert!(alice.remove_identities(channel, &["carol".into()]).unwrap().is_none());
+
+        let (_, secret) = alice.encrypt(channel, &content("without carol")).unwrap();
+        assert!(matches!(bob.process(channel, &secret).unwrap(), Incoming::Message(m) if m.body == "without carol"));
+        let _ = carol.process(channel, &remove.commit);
+        assert!(carol.process(channel, &secret).is_err());
     }
 
     #[test]

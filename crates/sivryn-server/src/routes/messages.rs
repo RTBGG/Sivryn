@@ -3,9 +3,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use sivryn_protocol::api::{MessagePage, MessageQuery, SendMessageRequest};
 use sivryn_protocol::gateway::Event;
-use sivryn_protocol::model::{ChannelKind, Message};
+use sivryn_protocol::model::{Message, MessageKind};
 use sivryn_protocol::permissions::Permissions;
-use sivryn_protocol::{ChannelId, GuildId, MessageId};
+use sivryn_protocol::{ChannelId, MessageId};
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -62,17 +63,40 @@ pub async fn send(
     Json(req): Json<SendMessageRequest>,
 ) -> ApiResult<(StatusCode, Json<Message>)> {
     let channel = db::require_channel(&state.db, channel_id, auth.id, Permissions::SEND_MESSAGES).await?;
-    if ChannelKind::parse(&channel.kind) != Some(ChannelKind::Text) {
-        return Err(ApiError::BadRequest("not a text channel".into()));
+    if !channel.kind().has_messages() {
+        return Err(ApiError::BadRequest("this channel has no messages".into()));
     }
     if req.ciphertext.is_empty() || req.ciphertext.len() > MAX_CIPHERTEXT_LEN {
         return Err(ApiError::BadRequest("ciphertext is empty or too large".into()));
     }
     db::require_own_device(&state.db, req.device_id, auth.id).await?;
 
+    // Edits and reactions must point at a normal message in this channel;
+    // only its author may edit it.
+    match (req.kind, req.target_id) {
+        (MessageKind::Message, None) => {}
+        (MessageKind::Message, Some(_)) => return Err(ApiError::BadRequest("messages have no target".into())),
+        (_, None) => return Err(ApiError::BadRequest("edits and reactions need a target".into())),
+        (kind, Some(target)) => {
+            let row: Option<(Uuid, String)> =
+                sqlx::query_as("SELECT author_id, kind FROM messages WHERE id = $1 AND channel_id = $2")
+                    .bind(target.0)
+                    .bind(channel_id.0)
+                    .fetch_optional(&state.db)
+                    .await?;
+            let (author, target_kind) = row.ok_or(ApiError::NotFound)?;
+            if MessageKind::parse(&target_kind) != MessageKind::Message {
+                return Err(ApiError::BadRequest("target must be a message".into()));
+            }
+            if kind == MessageKind::Edit && author != auth.id.0 {
+                return Err(ApiError::Forbidden);
+            }
+        }
+    }
+
     let row: MessageRow = sqlx::query_as(
-        "INSERT INTO messages (id, channel_id, author_id, sender_device_id, epoch, ciphertext)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+        "INSERT INTO messages (id, channel_id, author_id, sender_device_id, epoch, ciphertext, kind, target_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
     )
     .bind(MessageId::new().0)
     .bind(channel_id.0)
@@ -80,10 +104,39 @@ pub async fn send(
     .bind(req.device_id.0)
     .bind(req.epoch as i64)
     .bind(&req.ciphertext)
+    .bind(req.kind.as_str())
+    .bind(req.target_id.map(|t| t.0))
     .fetch_one(&state.db)
     .await?;
 
     let message: Message = row.into();
-    state.events.publish(Event::MessageCreate { guild_id: GuildId(channel.guild_id), message: message.clone() });
+    let audience = db::channel_audience(&state.db, &channel).await?;
+    state.events.publish(audience, Event::MessageCreate { message: message.clone() });
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// Deletes a message with its edits and reactions. Authors may delete their
+/// own messages; in guilds, `MANAGE_MESSAGES` may delete anyone's.
+pub async fn delete(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, message_id)): Path<(ChannelId, MessageId)>,
+) -> ApiResult<StatusCode> {
+    let channel = db::require_channel(&state.db, channel_id, auth.id, Permissions::VIEW_CHANNEL).await?;
+    let (author,): (Uuid,) = sqlx::query_as("SELECT author_id FROM messages WHERE id = $1 AND channel_id = $2")
+        .bind(message_id.0)
+        .bind(channel_id.0)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if author != auth.id.0 {
+        match channel.guild() {
+            Some(guild) => db::require(&state.db, guild, auth.id, Permissions::MANAGE_MESSAGES).await?,
+            None => return Err(ApiError::Forbidden),
+        }
+    }
+    sqlx::query("DELETE FROM messages WHERE id = $1").bind(message_id.0).execute(&state.db).await?;
+    let audience = db::channel_audience(&state.db, &channel).await?;
+    state.events.publish(audience, Event::MessageDelete { channel_id, message_id });
+    Ok(StatusCode::NO_CONTENT)
 }

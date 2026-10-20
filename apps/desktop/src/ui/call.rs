@@ -1,5 +1,5 @@
-//! Voice channel UI: join prompt, participant grid, controls, per-user
-//! volume and the screen picker.
+//! Calls: voice channels and DM calls, the participant grid, controls,
+//! incoming calls, the AFK move and the screen picker.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,7 +15,7 @@ use sivryn_media::{
 };
 
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, IconButton, Slider, Toggle};
+use super::widgets::{Avatar, IconButton, Toggle};
 use super::{AppState, CallState, Modal, Participant, Services};
 use crate::chat;
 use crate::i18n::t;
@@ -73,13 +73,12 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
 
 async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::AudioEngine) -> Result<(), String> {
     let Some(s) = state.session.cloned() else { return Ok(()) };
-    let guild = state.guild_of(channel).ok_or("unknown channel")?;
     if let Some(old) = state.call.take() {
         leave(old).await;
     }
     let join = s.api.join_voice(channel).await.map_err(|e| e.to_string())?;
     let media_key = if join.e2ee {
-        if !chat::ensure_group(&s, guild, channel).await? {
+        if !chat::ensure_group(&s, channel).await? {
             return Err(t("call.waiting_for_key").into());
         }
         Some(s.mls.borrow().media_key(channel).map_err(|e| e.to_string())?)
@@ -258,8 +257,9 @@ pub fn toggle_camera(mut state: AppState) {
     });
 }
 
+/// The call grid with controls. `compact` is the version above a DM's chat.
 #[component]
-pub fn CallView() -> Element {
+pub fn CallView(#[props(default)] compact: bool) -> Element {
     let mut state = use_context::<AppState>();
     let call = state.call.read();
     let Some(c) = call.as_ref() else { return rsx! {} };
@@ -285,13 +285,15 @@ pub fn CallView() -> Element {
     let count = participants.len();
 
     rsx! {
-        div { class: "call",
+        div { class: if compact { "call compact" } else { "call" },
+            if !compact {
             header { class: "topbar",
                 span { class: "topbar-icon", Svg { icon: Icon::Volume, size: 20 } }
                 span { class: "topbar-title", "{name}" }
                 span { class: "e2ee-badge", Svg { icon: Icon::ShieldCheck, size: 14 } {t("call.e2ee")} }
                 span { class: "topbar-spacer" }
                 span { class: "muted small", "{count} {t(\"call.in_call\")}" }
+            }
             }
             div { class: if focused.is_some() { "stage focus" } else { "stage" },
                 if let Some(feed) = focused.clone() {
@@ -344,16 +346,30 @@ pub fn CallView() -> Element {
 #[component]
 fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking: bool) -> Element {
     let state = use_context::<AppState>();
-    let mut menu = use_signal(|| false);
-    let me = state.call.read().as_ref().is_some_and(|c| c.identity == participant.identity);
-    let id = participant.identity.parse().ok();
+    let call_channel = state.call.read().as_ref().map(|c| c.channel);
+    let id: Option<sivryn_client_core::protocol::UserId> = participant.identity.parse().ok();
     let class = if speaking { "tile participant speaking" } else { "tile participant" };
+    let (identity, sharing) = (participant.identity.clone(), participant.sharing);
+    let open_menu = move |e: MouseEvent| {
+        let Some(user) = id else { return };
+        let p = e.client_coordinates();
+        let guild = call_channel.and_then(|c| state.guild_of(c));
+        let mut items = super::menu::user_items(state, user, guild, call_channel);
+        if sharing && Some(user) != state.me() {
+            items.insert(
+                items.iter().position(|i| matches!(i, super::MenuItem::Check { .. })).unwrap_or(items.len()),
+                super::MenuItem::Volume { label: t("call.stream_volume").into(), key: screen_volume_key(&identity) },
+            );
+        }
+        super::menu::open(state, p.x, p.y, items);
+    };
 
     rsx! {
         div { class: "{class}",
-            onclick: move |_| {
-                if !me {
-                    menu.toggle();
+            onclick: open_menu.clone(),
+            onmousedown: move |e| {
+                if super::menu::right_click(&e).is_some() {
+                    open_menu(e);
                 }
             },
             match camera {
@@ -373,60 +389,6 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
                     span { class: "live-badge", "LIVE" }
                 }
             }
-            if *menu.read() {
-                VolumeMenu { identity: participant.identity.clone(), sharing: participant.sharing, onclose: move |_| menu.set(false) }
-            }
-        }
-    }
-}
-
-/// Per-user (and per-share-audio) volume, saved in the settings.
-#[component]
-fn VolumeMenu(identity: String, sharing: bool, onclose: EventHandler<()>) -> Element {
-    let state = use_context::<AppState>();
-    let volumes = state.settings.read().volumes.clone();
-    let voice_key = identity.clone();
-    let screen_key = screen_volume_key(&identity);
-    let voice = volumes.get(&voice_key).copied().unwrap_or(1.0);
-    let screen = volumes.get(&screen_key).copied().unwrap_or(1.0);
-
-    rsx! {
-        div { class: "volume-menu", onclick: move |e| e.stop_propagation(),
-            div { class: "menu-row",
-                span { {t("call.user_volume")} }
-                span { class: "muted small", "{(voice * 100.0).round()} %" }
-            }
-            Slider {
-                value: voice,
-                min: 0.0,
-                max: 2.0,
-                steps: 40,
-                onchange: move |v: f32| {
-                    let key = voice_key.clone();
-                    state.update_settings(|s| {
-                        s.volumes.insert(key, v);
-                    });
-                },
-            }
-            if sharing {
-                div { class: "menu-row",
-                    span { {t("call.stream_volume")} }
-                    span { class: "muted small", "{(screen * 100.0).round()} %" }
-                }
-                Slider {
-                    value: screen,
-                    min: 0.0,
-                    max: 2.0,
-                    steps: 40,
-                    onchange: move |v: f32| {
-                        let key = screen_key.clone();
-                        state.update_settings(|s| {
-                            s.volumes.insert(key, v);
-                        });
-                    },
-                }
-            }
-            div { class: "menu-close", onclick: move |_| onclose.call(()), {t("common.close")} }
         }
     }
 }
@@ -604,6 +566,188 @@ pub fn ScreenPicker() -> Element {
                 if let Some(err) = error.read().as_ref() {
                     div { class: "form-error", "{err}" }
                 }
+            }
+        }
+    }
+}
+
+/// Starts or joins the call in a channel (voice channel or DM), optionally
+/// with the camera on.
+pub fn start(state: AppState, channel: ChannelId, camera: bool) {
+    if state.call.peek().as_ref().is_some_and(|c| c.channel == channel) {
+        if camera && !state.call.peek().as_ref().is_some_and(|c| c.camera_on) {
+            toggle_camera(state);
+        }
+        return;
+    }
+    let engine = super::use_services_engine();
+    spawn_forever(async move {
+        match connect(state, channel, engine.clone()).await {
+            Ok(()) => {
+                engine.play(Sound::Join);
+                if camera {
+                    toggle_camera(state);
+                }
+            }
+            Err(e) => state.report(Err(e)),
+        }
+    });
+}
+
+/// The call area above a DM's messages: the call itself while connected,
+/// otherwise a banner when others are in it.
+#[component]
+pub fn DmCall(channel: ChannelId) -> Element {
+    let state = use_context::<AppState>();
+    let in_call = state.call.read().as_ref().is_some_and(|c| c.channel == channel);
+    let mut others = use_signal(Vec::<sivryn_client_core::protocol::UserId>::new);
+    use_future(move || async move {
+        loop {
+            if let Some(s) = state.session.cloned()
+                && !state.call.peek().as_ref().is_some_and(|c| c.channel == channel)
+            {
+                let now: Vec<_> = match s.api.channel_voice_state(channel).await {
+                    Ok(v) => v.participants.into_iter().map(|p| p.user_id).collect(),
+                    Err(_) => Vec::new(),
+                };
+                if *others.peek() != now {
+                    others.set(now);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    if in_call {
+        return rsx! { div { class: "dm-call", CallView { compact: true } } };
+    }
+    let present = others.read().clone();
+    if present.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "dm-call-banner",
+            div { class: "join-present",
+                for u in present.iter() {
+                    Avatar { key: "{u}", name: state.username(*u), id: Some(*u), size: 28 }
+                }
+            }
+            span { {t("call.ongoing")} }
+            span { class: "topbar-spacer" }
+            button { class: "button primary small", onclick: move |_| start(state, channel, false),
+                Svg { icon: Icon::Phone, size: 15 }
+                {t("call.join")}
+            }
+        }
+    }
+}
+
+/// Rings until the call is answered, declined or 30 seconds have passed.
+pub fn ring(mut state: AppState) {
+    static RINGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RINGING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let engine = super::use_services_engine();
+    spawn_forever(async move {
+        let started = std::time::Instant::now();
+        let first = *state.ringing.peek();
+        while state.ringing.peek().is_some() && *state.ringing.peek() == first {
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                state.ringing.set(None);
+                break;
+            }
+            engine.play(Sound::Ring);
+            tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        }
+        RINGING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+#[component]
+pub fn IncomingCall() -> Element {
+    let mut state = use_context::<AppState>();
+    let Some((channel, caller)) = *state.ringing.read() else { return rsx! {} };
+    let name = state.username(caller);
+    let group = state
+        .dm(channel)
+        .filter(|d| d.channel.kind == sivryn_client_core::protocol::model::ChannelKind::Group)
+        .map(|d| state.dm_title(&d));
+    let subtitle = match group {
+        Some(group) => format!("{} {group}", t("call.incoming_group")),
+        None => t("call.incoming").to_string(),
+    };
+
+    rsx! {
+        div { class: "incoming-call",
+            Avatar { name: name.clone(), id: Some(caller), size: 72 }
+            div { class: "incoming-name", "{name}" }
+            div { class: "muted small", "{subtitle}" }
+            div { class: "incoming-actions",
+                IconButton { icon: Icon::PhoneOff, class: "control danger", title: t("call.decline"), onclick: move |_| state.ringing.set(None) }
+                IconButton {
+                    icon: Icon::Video,
+                    class: "control accept",
+                    title: t("call.accept_video"),
+                    onclick: move |_| {
+                        state.ringing.set(None);
+                        state.open_channel(channel);
+                        start(state, channel, true);
+                    },
+                }
+                IconButton {
+                    icon: Icon::Phone,
+                    class: "control accept",
+                    title: t("call.accept"),
+                    onclick: move |_| {
+                        state.ringing.set(None);
+                        state.open_channel(channel);
+                        start(state, channel, false);
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Milliseconds since the last keyboard or mouse input anywhere.
+#[cfg(windows)]
+fn idle_ms() -> u64 {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO { cbSize: size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    // SAFETY: plain query into a correctly sized struct.
+    if unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+        // SAFETY: no arguments.
+        u64::from(unsafe { GetTickCount() }.wrapping_sub(info.dwTime))
+    } else {
+        0
+    }
+}
+
+#[cfg(not(windows))]
+fn idle_ms() -> u64 {
+    0
+}
+
+/// Moves you to the guild's AFK channel after its timeout without input and
+/// without speaking.
+pub async fn afk_watch(state: AppState) {
+    let engine = super::use_services_engine();
+    let mut last_spoke = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if engine.transmitting() {
+            last_spoke = std::time::Instant::now();
+        }
+        let Some(channel) = state.call.peek().as_ref().map(|c| c.channel) else { continue };
+        let Some(guild) = state.guild_of(channel).and_then(|g| state.guild(g)) else { continue };
+        let Some(afk) = guild.afk_channel_id.filter(|afk| *afk != channel) else { continue };
+        let timeout = u64::from(guild.afk_timeout_minutes.max(1)) * 60_000;
+        if idle_ms() >= timeout && last_spoke.elapsed().as_millis() as u64 >= timeout {
+            tracing::info!("idle, moving to the AFK channel");
+            match connect(state, afk, engine.clone()).await {
+                Ok(()) => state.toast(t("call.moved_afk"), false),
+                Err(e) => state.report(Err(e)),
             }
         }
     }

@@ -415,6 +415,20 @@ impl ElementCx<'_> {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
 
+            // Sivryn patch: highlight selected static text (blitz_dom::text_selection).
+            if let Some(selection) = blitz_dom::text_selection::for_node(self.node.id) {
+                let transform = Affine::translate((pos.x * self.scale, pos.y * self.scale));
+                for (rect, _line) in selection.geometry(&text_layout.layout) {
+                    scene.fill(
+                        Fill::NonZero,
+                        transform,
+                        color::AlphaColor::from_rgba8(124, 108, 255, 110),
+                        None,
+                        &convert_rect(&rect),
+                    );
+                }
+            }
+
             // Render text
             crate::text::stroke_text(
                 self.scale,
@@ -437,6 +451,7 @@ impl ElementCx<'_> {
             }
 
             if self.node.is_focussed() {
+                blitz_dom::caret::mark_drawn();
                 // Render selection/caret
                 for (rect, _line_idx) in input_data.editor.selection_geometry().iter() {
                     scene.fill(
@@ -447,7 +462,8 @@ impl ElementCx<'_> {
                         &convert_rect(rect),
                     );
                 }
-                if let Some(cursor) = input_data.editor.cursor_geometry(1.5) {
+                // Sivryn patch: the caret blinks (blitz_dom::caret).
+                if let Some(cursor) = input_data.editor.cursor_geometry(1.5).filter(|_| blitz_dom::caret::visible()) {
                     // Sivryn patch: draw the caret in the text colour instead
                     // of black, so it stays visible on dark backgrounds.
                     let caret_color =
@@ -506,6 +522,7 @@ impl ElementCx<'_> {
         let x_at = |byte: usize| x0 + text[..byte].chars().count() as f64 * step;
 
         if self.node.is_focussed() {
+            blitz_dom::caret::mark_drawn();
             let selection = editor.raw_selection();
             if let Some(caret) = caret {
                 if !selection.is_collapsed() {
@@ -513,9 +530,11 @@ impl ElementCx<'_> {
                     let rect = Rect::new(x_at(range.start), caret.y0, x_at(range.end), caret.y1);
                     scene.fill(Fill::NonZero, transform, color::palette::css::STEEL_BLUE, None, &rect);
                 }
-                let x = x_at(selection.focus().index().min(text.len()));
-                let rect = Rect::new(x, caret.y0, x + caret.width(), caret.y1);
-                scene.fill(Fill::NonZero, transform, color, None, &rect);
+                if blitz_dom::caret::visible() {
+                    let x = x_at(selection.focus().index().min(text.len()));
+                    let rect = Rect::new(x, caret.y0, x + caret.width(), caret.y1);
+                    scene.fill(Fill::NonZero, transform, color, None, &rect);
+                }
             }
         }
 

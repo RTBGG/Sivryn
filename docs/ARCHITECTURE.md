@@ -43,6 +43,13 @@ puts screen sharing quality first, then easy self-hosting, then everything else.
 | Global hotkeys | **Polling `GetAsyncKeyState` every 10 ms** | No keyboard hook: no input lag if the app stalls, nothing for anti-cheat to flag, mouse side buttons work | Up to 10 ms detection delay; Windows only for now |
 | Screen share audio | **WASAPI process loopback** | Window share: only that app's sound. Screen share: everything except Sivryn, so voices never echo back | Windows 10 2004 or newer |
 | UI design | **Graphite & violet, Inter bundled, dark + light** | Modern and calm; identical text rendering on every platform | +0.9 MB font in the binary |
+| Attachments | **Encrypted files on a local volume** | Each file gets its own XChaCha20-Poly1305 key, which travels inside the MLS message; the server stores only ciphertext under `SIVRYN_FILES_DIR` | No server-side thumbnails or deduplication; S3 would need another backend |
+| Edits, reactions, replies | **MLS messages of their own kind** (`edit`, `reaction`, pointing at a message) | The server never sees what was changed or which emoji was used | Clients fold them into the message; history pages contain them too |
+| Link previews | **Built by the sender** (like Signal) | Receivers never contact the linked site, the server never sees the URL; preview images are uploaded encrypted | The sender's IP is visible to the linked site; can be turned off |
+| Video playback | **Media Foundation source reader** | Decodes H.264/HEVC/VP9/AV1 with the GPU where available, no extra codecs shipped | Windows only; formats depend on installed codecs |
+| Emoji | **Twemoji font bundled** | Same look everywhere, works in Blitz's text renderer | +1.5 MB in the binary |
+| Text selection | **Blitz patch** | Select within one message, double/triple click, Ctrl+C | Selection can't span several messages |
+| Friends and DMs | **Request + accept; DMs from friends and (optionally) server members** | Familiar, and blocking or turning off server DMs stops unwanted messages | Groups are capped at 10 members |
 
 ## Screen sharing pipeline
 
@@ -71,11 +78,14 @@ CPU-intensive at 1440p60), plus end-to-end latency and quality against Discord.
 ## End-to-end encryption
 
 - Every channel is one MLS group whose members are **devices**.
+- DMs and groups are MLS groups like any channel.
 - The server is the delivery service. It stores one-time key packages (only claimable by
-  people who share a guild), orders commits per channel through a primary key on
+  people who share a guild, a DM or a friendship), orders commits per channel through a primary key on
   `(channel_id, epoch)` (a losing commit gets `409`, and the client discards it and catches
   up), and relays welcomes.
-- Messages are stored as MLS ciphertext. The server cannot read them.
+- Messages are stored as MLS ciphertext. The server cannot read them. Edits and reactions
+  are encrypted messages of their own kind; files are encrypted with a per-file key carried in
+  the message.
 - Voice and video E2EE: `media_key = MLS-Exporter("sivryn media e2ee v1", channel_id, 32)`
   feeds LiveKit's frame encryption (AES-GCM). A new epoch (someone joins or leaves) means a
   new key.
@@ -88,9 +98,12 @@ a client applies missed commits first and still decrypts the messages sent in be
 (`GET /devices/{id}/key-packages`). Decrypted messages are stored before the MLS state that
 consumed their keys, so a crash can cause a refetch but never a lost message.
 
-**Known limits:** if two devices create the same channel group at the same moment, both stay
-in their own group until one of them re-joins. Messages sent before a device joined cannot be
-decrypted (forward secrecy by design).
+If two devices create the same channel group at the same moment, the server accepts only one
+first commit; the other device drops its provisional group (epoch 0, only itself) and joins from
+the winner's welcome, even when the welcome arrives before its own commit is rejected.
+
+**Known limits:** messages sent before a device joined cannot be decrypted (forward secrecy by
+design).
 
 ## Audio pipeline
 
@@ -109,7 +122,7 @@ stereo at 128 kbit/s without DTX, with its own volume per viewer.
 
 ## Event flow
 
-REST writes go to PostgreSQL and then to `EventBus::publish`. Every gateway connection
-subscribes to the bus and filters by the guilds the user belongs to; MLS welcomes are
-filtered by device. With NATS configured, events cross instances. A client that falls too
+REST writes go to PostgreSQL and then to `EventBus::publish`, addressed to a guild, a set of
+users (DMs, friends) or devices (MLS welcomes). Every gateway connection subscribes to the bus
+and keeps what is addressed to it. Presence is counted per user across their connections. With NATS configured, events cross instances. A client that falls too
 far behind is disconnected and resyncs on reconnect.

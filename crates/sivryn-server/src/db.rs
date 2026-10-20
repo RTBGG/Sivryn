@@ -1,9 +1,10 @@
 //! Database rows and shared queries.
 
 use chrono::{DateTime, Utc};
-use sivryn_protocol::model::{Channel, ChannelKind, Guild, Message, User};
+use sivryn_protocol::gateway::Audience;
+use sivryn_protocol::model::{Channel, ChannelKind, Guild, Message, MessageKind, User};
 use sivryn_protocol::permissions::Permissions;
-use sivryn_protocol::{ChannelId, DeviceId, GuildId, MessageId, UserId};
+use sivryn_protocol::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ pub struct UserRow {
     pub password_hash: Option<String>,
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,
+    pub allow_server_dms: bool,
 }
 
 impl From<UserRow> for User {
@@ -31,31 +33,53 @@ pub struct GuildRow {
     pub name: String,
     pub owner_id: Uuid,
     pub created_at: DateTime<Utc>,
+    pub icon_id: Option<Uuid>,
+    pub afk_channel_id: Option<Uuid>,
+    pub afk_timeout_minutes: i32,
 }
 
 impl From<GuildRow> for Guild {
     fn from(r: GuildRow) -> Self {
-        Guild { id: GuildId(r.id), name: r.name, owner_id: UserId(r.owner_id), created_at: r.created_at }
+        Guild {
+            id: GuildId(r.id),
+            name: r.name,
+            owner_id: UserId(r.owner_id),
+            created_at: r.created_at,
+            icon_id: r.icon_id.map(FileId),
+            afk_channel_id: r.afk_channel_id.map(ChannelId),
+            afk_timeout_minutes: r.afk_timeout_minutes.max(1) as u32,
+        }
     }
 }
 
 #[derive(sqlx::FromRow)]
 pub struct ChannelRow {
     pub id: Uuid,
-    pub guild_id: Uuid,
+    pub guild_id: Option<Uuid>,
     pub name: String,
     pub kind: String,
     pub position: i32,
     pub e2ee: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ChannelRow {
+    pub fn kind(&self) -> ChannelKind {
+        ChannelKind::parse(&self.kind).unwrap_or(ChannelKind::Text)
+    }
+
+    pub fn guild(&self) -> Option<GuildId> {
+        self.guild_id.map(GuildId)
+    }
 }
 
 impl From<ChannelRow> for Channel {
     fn from(r: ChannelRow) -> Self {
         Channel {
             id: ChannelId(r.id),
-            guild_id: GuildId(r.guild_id),
+            guild_id: r.guild_id.map(GuildId),
+            kind: r.kind(),
             name: r.name,
-            kind: ChannelKind::parse(&r.kind).unwrap_or(ChannelKind::Text),
             position: r.position,
             e2ee: r.e2ee,
         }
@@ -71,6 +95,8 @@ pub struct MessageRow {
     pub epoch: i64,
     pub ciphertext: String,
     pub created_at: DateTime<Utc>,
+    pub kind: String,
+    pub target_id: Option<Uuid>,
 }
 
 impl From<MessageRow> for Message {
@@ -80,6 +106,8 @@ impl From<MessageRow> for Message {
             channel_id: ChannelId(r.channel_id),
             author_id: UserId(r.author_id),
             sender_device_id: DeviceId(r.sender_device_id),
+            kind: MessageKind::parse(&r.kind),
+            target_id: r.target_id.map(MessageId),
             epoch: r.epoch as u64,
             ciphertext: r.ciphertext,
             created_at: r.created_at,
@@ -89,6 +117,20 @@ impl From<MessageRow> for Message {
 
 pub async fn user(pool: &PgPool, id: UserId) -> ApiResult<UserRow> {
     Ok(sqlx::query_as("SELECT * FROM users WHERE id = $1").bind(id.0).fetch_one(pool).await?)
+}
+
+pub async fn users(pool: &PgPool, ids: &[UserId]) -> ApiResult<Vec<User>> {
+    let ids: Vec<Uuid> = ids.iter().map(|u| u.0).collect();
+    let rows: Vec<UserRow> = sqlx::query_as("SELECT * FROM users WHERE id = ANY($1) ORDER BY lower(username)")
+        .bind(&ids)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn guild(pool: &PgPool, id: GuildId) -> ApiResult<Guild> {
+    let row: GuildRow = sqlx::query_as("SELECT * FROM guilds WHERE id = $1").bind(id.0).fetch_one(pool).await?;
+    Ok(row.into())
 }
 
 pub async fn channel(pool: &PgPool, id: ChannelId) -> ApiResult<ChannelRow> {
@@ -142,7 +184,29 @@ pub async fn require(pool: &PgPool, guild: GuildId, user: UserId, required: Perm
     }
 }
 
-/// Loads a channel and checks that `user` may use it with `required` permissions.
+/// What members of a DM or group may do: everything except managing guilds.
+fn private_permissions() -> Permissions {
+    Permissions::VIEW_CHANNEL
+        | Permissions::SEND_MESSAGES
+        | Permissions::ATTACH_FILES
+        | Permissions::CONNECT
+        | Permissions::SPEAK
+        | Permissions::VIDEO
+        | Permissions::SCREEN_SHARE
+}
+
+pub async fn is_channel_member(pool: &PgPool, channel: ChannelId, user: UserId) -> ApiResult<bool> {
+    let (member,): (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2)")
+            .bind(channel.0)
+            .bind(user.0)
+            .fetch_one(pool)
+            .await?;
+    Ok(member)
+}
+
+/// Loads a channel and checks that `user` may use it with `required`
+/// permissions: guild permissions for guild channels, membership for DMs.
 pub async fn require_channel(
     pool: &PgPool,
     channel_id: ChannelId,
@@ -150,8 +214,89 @@ pub async fn require_channel(
     required: Permissions,
 ) -> ApiResult<ChannelRow> {
     let channel = channel(pool, channel_id).await?;
-    require(pool, GuildId(channel.guild_id), user, required).await?;
+    match channel.guild() {
+        Some(guild) => require(pool, guild, user, required).await?,
+        None => {
+            if !is_channel_member(pool, channel_id, user).await? {
+                return Err(ApiError::NotFound);
+            }
+            if !private_permissions().contains(required) {
+                return Err(ApiError::Forbidden);
+            }
+        }
+    }
     Ok(channel)
+}
+
+pub async fn channel_member_ids(pool: &PgPool, channel: ChannelId) -> ApiResult<Vec<UserId>> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as("SELECT user_id FROM channel_members WHERE channel_id = $1")
+        .bind(channel.0)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(id,)| UserId(id)).collect())
+}
+
+/// Who receives events about a channel.
+pub async fn channel_audience(pool: &PgPool, channel: &ChannelRow) -> ApiResult<Audience> {
+    Ok(match channel.guild() {
+        Some(guild) => Audience::Guild(guild),
+        None => Audience::Users(channel_member_ids(pool, ChannelId(channel.id)).await?),
+    })
+}
+
+/// Users whose presence `user` may see: friends and people sharing a guild.
+pub async fn related_users(pool: &PgPool, user: UserId) -> ApiResult<Vec<UserId>> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT friend_id FROM friends WHERE user_id = $1
+         UNION
+         SELECT b.user_id FROM guild_members a JOIN guild_members b ON a.guild_id = b.guild_id
+         WHERE a.user_id = $1 AND b.user_id <> $1
+         UNION
+         SELECT b.user_id FROM channel_members a JOIN channel_members b ON a.channel_id = b.channel_id
+         WHERE a.user_id = $1 AND b.user_id <> $1",
+    )
+    .bind(user.0)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| UserId(id)).collect())
+}
+
+pub async fn are_friends(pool: &PgPool, a: UserId, b: UserId) -> ApiResult<bool> {
+    let (yes,): (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM friends WHERE user_id = $1 AND friend_id = $2)")
+        .bind(a.0)
+        .bind(b.0)
+        .fetch_one(pool)
+        .await?;
+    Ok(yes)
+}
+
+pub async fn share_guild(pool: &PgPool, a: UserId, b: UserId) -> ApiResult<bool> {
+    let (yes,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM guild_members x JOIN guild_members y ON x.guild_id = y.guild_id
+             WHERE x.user_id = $1 AND y.user_id = $2
+         )",
+    )
+    .bind(a.0)
+    .bind(b.0)
+    .fetch_one(pool)
+    .await?;
+    Ok(yes)
+}
+
+/// Whether either user blocked the other.
+pub async fn blocked_either_way(pool: &PgPool, a: UserId, b: UserId) -> ApiResult<bool> {
+    let (yes,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM blocks
+             WHERE (user_id = $1 AND blocked_id = $2) OR (user_id = $2 AND blocked_id = $1)
+         )",
+    )
+    .bind(a.0)
+    .bind(b.0)
+    .fetch_one(pool)
+    .await?;
+    Ok(yes)
 }
 
 /// Ensures `device` belongs to `user`.

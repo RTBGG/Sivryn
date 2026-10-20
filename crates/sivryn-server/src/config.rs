@@ -21,6 +21,10 @@ pub struct Config {
     /// instances can run behind a load balancer.
     pub nats_url: Option<String>,
     pub oidc: Option<OidcConfig>,
+    /// Where uploaded files live (a Docker volume in production).
+    pub files_dir: std::path::PathBuf,
+    /// Largest accepted upload in bytes (`SIVRYN_MAX_UPLOAD_MB`, default 100).
+    pub max_upload_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +95,8 @@ impl Config {
             camera: CameraLimits::default(),
             nats_url: env::var("SIVRYN_NATS_URL").ok().filter(|s| !s.is_empty()),
             oidc,
+            files_dir: var_or("SIVRYN_FILES_DIR", "/data/files").into(),
+            max_upload_bytes: parse_or::<u64>("SIVRYN_MAX_UPLOAD_MB", 100)? * 1024 * 1024,
         })
     }
 }

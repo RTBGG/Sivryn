@@ -82,7 +82,8 @@ struct Remote {
     volume_key: String,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     primed: bool,
-    task: tokio::task::JoinHandle<()>,
+    /// Feeds `buffer` from a LiveKit track; `None` for local streams.
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct Inner {
@@ -253,21 +254,41 @@ impl AudioEngine {
         let mut remotes = lock(&self.inner.remotes);
         remotes.retain(|r| {
             let keep = r.track_sid != track_sid;
-            if !keep {
-                r.task.abort();
+            if !keep && let Some(task) = &r.task {
+                task.abort();
             }
             keep
         });
-        remotes.push(Remote { track_sid, volume_key, buffer, primed: false, task });
+        remotes.push(Remote { track_sid, volume_key, buffer, primed: false, task: Some(task) });
         drop(remotes);
         self.ensure_threads();
+    }
+
+    /// Plays audio produced locally (a video in the chat): push interleaved
+    /// 48 kHz stereo samples into the returned buffer. Remove it with
+    /// [`AudioEngine::remove_local_stream`].
+    pub fn add_local_stream(&self, key: &str) -> Arc<Mutex<VecDeque<f32>>> {
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        lock(&self.inner.remotes).push(Remote {
+            track_sid: key.to_owned(),
+            volume_key: key.to_owned(),
+            buffer: buffer.clone(),
+            primed: false,
+            task: None,
+        });
+        self.ensure_threads();
+        buffer
+    }
+
+    pub fn remove_local_stream(&self, key: &str) {
+        self.remove_remote(key);
     }
 
     pub(crate) fn remove_remote(&self, track_sid: &str) {
         lock(&self.inner.remotes).retain(|r| {
             let keep = r.track_sid != track_sid;
-            if !keep {
-                r.task.abort();
+            if !keep && let Some(task) = &r.task {
+                task.abort();
             }
             keep
         });
@@ -275,7 +296,9 @@ impl AudioEngine {
 
     pub(crate) fn clear_remotes(&self) {
         for r in lock(&self.inner.remotes).drain(..) {
-            r.task.abort();
+            if let Some(task) = &r.task {
+                task.abort();
+            }
         }
     }
 

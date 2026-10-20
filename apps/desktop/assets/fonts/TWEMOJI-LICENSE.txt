@@ -1,0 +1,9 @@
+TwemojiMozilla.ttf: Twemoji COLR font, version 0.7.0
+https://github.com/mozilla/twemoji-colr
+
+The emoji graphics are from Twemoji (https://github.com/twitter/twemoji),
+Copyright 2019 Twitter, Inc and other contributors.
+Graphics licensed under CC-BY 4.0: https://creativecommons.org/licenses/by/4.0/
+
+The font build (twemoji-colr) is licensed under the Apache License 2.0:
+https://www.apache.org/licenses/LICENSE-2.0

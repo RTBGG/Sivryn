@@ -425,7 +425,7 @@ async fn end_to_end_encrypted_message_over_gateway() {
     }
     assert!(welcomed, "welcome not delivered over gateway");
 
-    let content = MessageContent { body: "hallo bob".into(), reply_to: None };
+    let content = MessageContent { body: "hallo bob".into(), ..Default::default() };
     let (epoch, ciphertext) = alice_mls.encrypt(channel, &content).unwrap();
     let (status, json) = app
         .post(

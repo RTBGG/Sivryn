@@ -1,7 +1,7 @@
 # Patched crates
 
-Dioxus Native 0.7 renders with Blitz 0.2. Two of its crates are vendored here with small
-patches and wired in through `[patch.crates-io]` in the workspace `Cargo.toml`. Both are
+Dioxus Native 0.7 renders with Blitz 0.2. Three of its crates are vendored here with small
+patches and wired in through `[patch.crates-io]` in the workspace `Cargo.toml`. All are
 upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search for
 "Sivryn patch" to find every change.
 
@@ -19,6 +19,23 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 
 - `src/layout/construct.rs`: text inputs honour `font-family` and `font-weight`; before,
   they always used the default font.
+- `src/caret.rs` (+ `document.rs`, `events/keyboard.rs`, `events/mouse.rs`, and
+  `blitz-paint/src/render.rs`): the text caret blinks at the Windows rate (530 ms) and
+  restarts visible on typing and clicks. The app schedules a repaint at each toggle.
+- `src/text_selection.rs` (+ `events/mod.rs`, `events/keyboard.rs`, `lib.rs` and
+  `blitz-paint/src/render.rs`): static text inside an element with the class `selectable` can
+  be selected with the mouse (drag, double-click for a word, triple-click for a line) and
+  copied with Ctrl+C. Upstream only selects inside text inputs.
+- `src/stick_bottom.rs` (+ `document.rs`): a scroll container with a `data-stick-bottom`
+  attribute starts at the bottom and follows new content until the user scrolls up (chat logs).
+- `src/node/node.rs` (`Node::hit`): a node's own box is hit-tested before its scroll offset is
+  applied, and content overflowing a clipping box is ignored. Upstream added the offset first,
+  so clicks above or beside a scrolled container landed on its hidden, scrolled-away children.
+
+## blitz-shell 0.2.3
+
+- `src/file_drop.rs`, `src/window.rs`: files dragged onto the window are forwarded to a
+  handler the app installs (`blitz_shell::file_drop::set_handler`); Blitz ignored them.
 
 ## sonora-agc2 0.2.0 and sonora-common-audio 0.2.0
 

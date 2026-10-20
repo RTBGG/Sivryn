@@ -12,9 +12,9 @@ use sivryn_protocol::api::{
     ClaimedKeyPackage, KeyPackageCount, MlsCommitRequest, MlsWelcome, PendingWelcome, RegisterDeviceRequest,
     RegisterDeviceResponse, StoredCommit,
 };
-use sivryn_protocol::gateway::Event;
+use sivryn_protocol::gateway::{Audience, Event};
 use sivryn_protocol::permissions::Permissions;
-use sivryn_protocol::{ChannelId, DeviceId, GuildId, UserId};
+use sivryn_protocol::{ChannelId, DeviceId, UserId};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -98,19 +98,22 @@ pub async fn claim_key_packages(
     auth: AuthUser,
     Path(user_id): Path<UserId>,
 ) -> ApiResult<Json<Vec<ClaimedKeyPackage>>> {
-    // Only people who share a guild may add someone to a group; otherwise
-    // anyone could drain a user's one-time key packages.
-    let (shares_guild,): (bool,) = sqlx::query_as(
+    // Only people who share a guild, a DM or a friendship may add someone to
+    // a group; otherwise anyone could drain a user's one-time key packages.
+    let (related,): (bool,) = sqlx::query_as(
         "SELECT EXISTS (
              SELECT 1 FROM guild_members a JOIN guild_members b ON a.guild_id = b.guild_id
              WHERE a.user_id = $1 AND b.user_id = $2
-         )",
+         ) OR EXISTS (
+             SELECT 1 FROM channel_members a JOIN channel_members b ON a.channel_id = b.channel_id
+             WHERE a.user_id = $1 AND b.user_id = $2
+         ) OR EXISTS (SELECT 1 FROM friends WHERE user_id = $1 AND friend_id = $2)",
     )
     .bind(auth.id.0)
     .bind(user_id.0)
     .fetch_one(&state.db)
     .await?;
-    if !shares_guild {
+    if !related && auth.id != user_id {
         return Err(ApiError::NotFound);
     }
 
@@ -177,14 +180,10 @@ pub async fn commit(
     }
     tx.commit().await?;
 
-    state.events.publish(Event::MlsCommit {
-        guild_id: GuildId(channel.guild_id),
-        channel_id,
-        epoch: req.epoch,
-        commit: req.commit,
-    });
+    let audience = db::channel_audience(&state.db, &channel).await?;
+    state.events.publish(audience, Event::MlsCommit { channel_id, epoch: req.epoch, commit: req.commit });
     if let Some(welcome) = req.welcome {
-        state.events.publish(Event::MlsWelcome { channel_id, welcome });
+        state.events.publish(Audience::Devices(welcome.recipients.clone()), Event::MlsWelcome { channel_id, welcome });
     }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -5,13 +5,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod chat;
+mod emoji;
+mod files;
 mod hotkeys;
 mod i18n;
+mod messages;
+mod preview;
 mod session;
 mod settings;
 mod store;
 mod ui;
 mod video_surface;
+mod window;
 
 use dioxus_native::{LogicalSize, WindowAttributes};
 use tracing_subscriber::EnvFilter;
@@ -28,6 +33,7 @@ fn main() {
 
     let window = WindowAttributes::default()
         .with_title("Sivryn")
+        .with_window_icon(window::icon())
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(900.0, 560.0));
 

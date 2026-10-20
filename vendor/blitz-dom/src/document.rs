@@ -859,6 +859,9 @@ impl BaseDocument {
         self.resolve_layout();
         timer.record_time("layout");
 
+        // Sivryn patch: keep pinned scroll containers at the bottom.
+        crate::stick_bottom::apply(self);
+
         // Clear all damage
         #[cfg(feature = "incremental")]
         {
@@ -897,6 +900,8 @@ impl BaseDocument {
             self.snapshot_node_and(id, |node| node.blur());
             self.focus_node_id = None;
         }
+        // Sivryn patch: caret blinking (see caret.rs).
+        crate::caret::set_input_focused(false);
     }
 
     pub fn set_mousedown_node_id(&mut self, node_id: Option<usize>) {
@@ -919,6 +924,12 @@ impl BaseDocument {
         self.snapshot_node_and(focus_node_id, |node| node.focus());
 
         self.focus_node_id = Some(focus_node_id);
+
+        // Sivryn patch: caret blinking (see caret.rs).
+        let is_text_input = self.nodes[focus_node_id]
+            .element_data()
+            .is_some_and(|el| el.text_input_data().is_some());
+        crate::caret::set_input_focused(is_text_input);
 
         true
     }
@@ -1312,9 +1323,15 @@ impl BaseDocument {
         }
 
         let has_changed = node.scroll_offset != initial;
+        let parent = node.parent;
+
+        // Sivryn patch: scrolling up unpins bottom-pinned containers.
+        if has_changed {
+            crate::stick_bottom::after_scroll(self, node_id);
+        }
 
         if bubble_x != 0.0 || bubble_y != 0.0 {
-            if let Some(parent) = node.parent {
+            if let Some(parent) = parent {
                 return self.scroll_node_by_has_changed(parent, bubble_x, bubble_y) | has_changed;
             } else {
                 return self.scroll_viewport_by_has_changed(bubble_x, bubble_y) | has_changed;

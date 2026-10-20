@@ -15,7 +15,7 @@ use sivryn_media::{AudioConfig, CameraQuality};
 use crate::hotkeys::Keybind;
 use crate::store::AccountId;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Instance URL of the last successful login.
@@ -28,10 +28,36 @@ pub struct Settings {
     pub audio: AudioConfig,
     /// Per-participant volume (identity, or `identity:screen` for share audio).
     pub volumes: HashMap<String, f32>,
+    /// Participants muted for this user only.
+    pub muted_users: std::collections::HashSet<String>,
+    /// Member list on the right of guild channels.
+    pub member_list: bool,
+    /// Attach previews of the first link to messages you send.
+    pub link_previews: bool,
     pub video: VideoSettings,
     pub keybinds: Keybinds,
     pub appearance: Appearance,
     pub notifications: Notifications,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            last_instance: None,
+            last_username: None,
+            auto_login: None,
+            last_guild: None,
+            audio: AudioConfig::default(),
+            volumes: HashMap::new(),
+            muted_users: Default::default(),
+            member_list: true,
+            link_previews: true,
+            video: VideoSettings::default(),
+            keybinds: Keybinds::default(),
+            appearance: Appearance::default(),
+            notifications: Notifications::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

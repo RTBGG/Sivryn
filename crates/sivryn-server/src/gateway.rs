@@ -8,7 +8,7 @@ use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUp
 use axum::response::Response;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use sivryn_protocol::gateway::{ClientMessage, Event, ServerMessage};
+use sivryn_protocol::gateway::{Audience, ClientMessage, Envelope, Event, ServerMessage};
 use sivryn_protocol::{DeviceId, GATEWAY_VERSION, GuildId, UserId};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, interval, timeout};
@@ -69,23 +69,38 @@ struct Session {
 
 impl Session {
     /// Updates membership from the event and decides whether to forward it.
-    fn accept(&mut self, event: &Event) -> bool {
-        match event {
+    fn accept(&mut self, envelope: &Envelope) -> bool {
+        // Membership changes affecting this user come first, so a user who
+        // just joined gets the guild's events and one who left gets the leave.
+        match &envelope.event {
             Event::GuildCreate { guild } if guild.owner_id == self.user_id => {
                 self.guilds.insert(guild.id);
-                true
             }
             Event::MemberJoin { guild_id, user } if user.id == self.user_id => {
                 self.guilds.insert(*guild_id);
-                true
             }
-            Event::MemberLeave { guild_id, user_id } if *user_id == self.user_id => self.guilds.remove(guild_id),
-            Event::GuildDelete { guild_id } => self.guilds.remove(guild_id),
-            Event::MlsWelcome { welcome, .. } => self.device_id.is_some_and(|d| welcome.recipients.contains(&d)),
-            // TODO: only forward presence of users sharing a guild.
-            Event::PresenceUpdate { .. } => true,
-            other => other.guild_id().is_some_and(|g| self.guilds.contains(&g)),
+            Event::MemberLeave { guild_id, user_id } if *user_id == self.user_id => {
+                return self.guilds.remove(guild_id);
+            }
+            Event::GuildDelete { guild_id } => return self.guilds.remove(guild_id),
+            _ => {}
         }
+        match &envelope.to {
+            Audience::Guild(guild) => self.guilds.contains(guild),
+            Audience::Users(users) => users.contains(&self.user_id),
+            Audience::Devices(devices) => self.device_id.is_some_and(|d| devices.contains(&d)),
+        }
+    }
+}
+
+/// Tells friends and people sharing a guild or DM that `user` came or went.
+async fn announce_presence(state: &AppState, user_id: UserId, online: bool) {
+    match db::related_users(&state.db, user_id).await {
+        Ok(users) if !users.is_empty() => {
+            state.events.publish(Audience::Users(users), Event::PresenceUpdate { user_id, online });
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not announce presence"),
     }
 }
 
@@ -130,51 +145,108 @@ async fn run(tx: &mut Tx, rx: &mut Rx, state: AppState) -> anyhow::Result<()> {
     let guilds = db::user_guilds(&state.db, user_id).await?;
     let mut session = Session { user_id, device_id, guilds: guilds.iter().map(|g| g.id).collect() };
     send(tx, &ServerMessage::Ready { user: user.into(), guilds }).await?;
-    state.events.publish(Event::PresenceUpdate { user_id, online: true });
+    if state.presence.connect(user_id) {
+        announce_presence(&state, user_id, true).await;
+    }
 
     let mut last_heartbeat = Instant::now();
     let mut watchdog = interval(Duration::from_secs(5));
 
-    let result = loop {
-        tokio::select! {
-            incoming = rx.next() => {
-                let Some(Ok(frame)) = incoming else { break Ok(()) };
-                match frame {
-                    WsMessage::Text(text) => match serde_json::from_str::<ClientMessage>(text.as_str()) {
-                        Ok(ClientMessage::Heartbeat { seq }) => {
-                            last_heartbeat = Instant::now();
-                            send(tx, &ServerMessage::HeartbeatAck { seq }).await?;
-                        }
-                        Ok(ClientMessage::Identify { .. }) => break Err(anyhow::anyhow!("already identified")),
-                        Err(e) => break Err(anyhow::anyhow!("invalid client message: {e}")),
-                    },
-                    WsMessage::Close(_) => break Ok(()),
-                    _ => {}
-                }
-            }
-            event = events.recv() => match event {
-                Ok(event) => {
-                    if session.accept(&event) {
-                        send(tx, &ServerMessage::Event(event)).await?;
+    // Inside a block so `?` still reaches the presence bookkeeping below.
+    let result: anyhow::Result<()> = async {
+        loop {
+            tokio::select! {
+                incoming = rx.next() => {
+                    let Some(Ok(frame)) = incoming else { break Ok(()) };
+                    match frame {
+                        WsMessage::Text(text) => match serde_json::from_str::<ClientMessage>(text.as_str()) {
+                            Ok(ClientMessage::Heartbeat { seq }) => {
+                                last_heartbeat = Instant::now();
+                                send(tx, &ServerMessage::HeartbeatAck { seq }).await?;
+                            }
+                            Ok(ClientMessage::Identify { .. }) => break Err(anyhow::anyhow!("already identified")),
+                            Err(e) => break Err(anyhow::anyhow!("invalid client message: {e}")),
+                        },
+                        WsMessage::Close(_) => break Ok(()),
+                        _ => {}
                     }
                 }
-                Err(RecvError::Lagged(skipped)) => {
-                    // The client fell too far behind; make it reconnect and resync.
-                    tracing::warn!(%user_id, skipped, "gateway client lagged");
-                    break Ok(());
-                }
-                Err(RecvError::Closed) => break Ok(()),
-            },
-            _ = watchdog.tick() => {
-                if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
-                    break Ok(());
+                event = events.recv() => match event {
+                    Ok(event) => {
+                        if session.accept(&event) {
+                            send(tx, &ServerMessage::Event(event.event)).await?;
+                        }
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        // The client fell too far behind; make it reconnect and resync.
+                        tracing::warn!(%user_id, skipped, "gateway client lagged");
+                        break Ok(());
+                    }
+                    Err(RecvError::Closed) => break Ok(()),
+                },
+                _ = watchdog.tick() => {
+                    if last_heartbeat.elapsed() > HEARTBEAT_TIMEOUT {
+                        break Ok(());
+                    }
                 }
             }
         }
-    };
+    }
+    .await;
 
-    // TODO: track connection counts per user so a second device staying online
-    // doesn't get reported as offline.
-    state.events.publish(Event::PresenceUpdate { user_id, online: false });
+    if state.presence.disconnect(user_id) {
+        announce_presence(&state, user_id, false).await;
+    }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use sivryn_protocol::gateway::{Audience, Envelope, Event};
+    use sivryn_protocol::{ChannelId, DeviceId, GuildId, MessageId, UserId};
+
+    use super::Session;
+
+    fn session(guilds: &[GuildId]) -> Session {
+        Session { user_id: UserId::new(), device_id: Some(DeviceId::new()), guilds: guilds.iter().copied().collect() }
+    }
+
+    fn env(to: Audience, event: Event) -> Envelope {
+        Envelope { to, event }
+    }
+
+    fn deleted() -> Event {
+        Event::MessageDelete { channel_id: ChannelId::new(), message_id: MessageId::new() }
+    }
+
+    #[test]
+    fn routes_by_guild_user_and_device() {
+        let g = GuildId::new();
+        let mut s = session(&[g]);
+        assert!(s.accept(&env(Audience::Guild(g), deleted())));
+        assert!(!s.accept(&env(Audience::Guild(GuildId::new()), deleted())));
+        assert!(s.accept(&env(Audience::Users(vec![UserId::new(), s.user_id]), deleted())));
+        assert!(!s.accept(&env(Audience::Users(vec![UserId::new()]), deleted())));
+        let device = s.device_id.unwrap();
+        assert!(s.accept(&env(Audience::Devices(vec![device]), deleted())));
+        assert!(!s.accept(&env(Audience::Devices(vec![DeviceId::new()]), deleted())));
+    }
+
+    #[test]
+    fn membership_follows_join_and_leave() {
+        let g = GuildId::new();
+        let mut s = session(&[]);
+        let me = s.user_id;
+        let user = sivryn_protocol::model::User {
+            id: me,
+            username: "me".into(),
+            display_name: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert!(s.accept(&env(Audience::Guild(g), Event::MemberJoin { guild_id: g, user })));
+        assert!(s.accept(&env(Audience::Guild(g), deleted())));
+        // The kicked user still hears about their own removal, then nothing more.
+        assert!(s.accept(&env(Audience::Guild(g), Event::MemberLeave { guild_id: g, user_id: me })));
+        assert!(!s.accept(&env(Audience::Guild(g), deleted())));
+    }
 }

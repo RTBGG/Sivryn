@@ -13,6 +13,7 @@ pub mod audio;
 pub mod call;
 pub mod camera;
 pub mod codec;
+pub mod player;
 pub mod screen;
 pub mod screen_audio;
 pub mod video;
@@ -21,6 +22,7 @@ pub use audio::{AudioConfig, AudioDevice, AudioEngine, NoiseSuppression, Sound, 
 pub use call::{CallEvent, VoiceCall, screen_volume_key};
 pub use camera::{CameraDevice, CameraQuality, CameraShare, list_cameras};
 pub use livekit::prelude::TrackSource;
+pub use player::MediaPlayer;
 pub use screen::{ScreenShare, ScreenSource, SourceKind, list_sources};
 pub use screen_audio::{LoopbackTarget, ScreenAudio, window_process};
 pub use video::{RgbaFrame, VideoFeed};

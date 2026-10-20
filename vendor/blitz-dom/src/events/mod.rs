@@ -21,7 +21,9 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
 
     match &event.data {
         DomEventData::MouseMove(mouse_event) => {
-            let changed = handle_mousemove(
+            // Sivryn patch: drag-selecting static text.
+            let selecting = crate::text_selection::mouse_move(doc, mouse_event.x, mouse_event.y, mouse_event.buttons);
+            let changed = selecting | handle_mousemove(
                 doc,
                 target_node_id,
                 mouse_event.x,
@@ -33,9 +35,16 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
             }
         }
         DomEventData::MouseDown(event) => {
+            // Sivryn patch: start (or clear) a static text selection.
+            if event.button == blitz_traits::events::MouseEventButton::Main
+                && crate::text_selection::mouse_down(doc, event.x, event.y)
+            {
+                doc.shell_provider.request_redraw();
+            }
             handle_mousedown(doc, target_node_id, event.x, event.y);
         }
         DomEventData::MouseUp(event) => {
+            crate::text_selection::mouse_up();
             handle_mouseup(doc, target_node_id, event, dispatch_event);
         }
         DomEventData::Click(event) => {

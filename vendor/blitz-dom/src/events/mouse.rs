@@ -53,6 +53,8 @@ pub(crate) fn handle_mousemove(
             .editor
             .driver(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx)
             .extend_selection_to_point(x as f32, y as f32);
+        // Sivryn patch: keep the caret visible while selecting.
+        crate::caret::reset();
 
         changed = true;
     }
@@ -61,6 +63,8 @@ pub(crate) fn handle_mousemove(
 }
 
 pub(crate) fn handle_mousedown(doc: &mut BaseDocument, target: usize, x: f32, y: f32) {
+    // Sivryn patch: a click shows the caret right away.
+    crate::caret::reset();
     let Some(hit) = doc.hit(x, y) else {
         return;
     };

@@ -21,7 +21,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sivryn_client_core::protocol::{ChannelId, DeviceId, MessageId, UserId};
 
-use crate::chat::ChatLine;
+use sivryn_client_core::protocol::model::{MessageContent, MessageKind};
+
+use crate::messages::Record;
 
 const KEYRING_SERVICE: &str = "Sivryn";
 const NONCE_LEN: usize = 24;
@@ -150,6 +152,16 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS messages_channel ON messages (channel_id, id);",
         )?;
+        // Version 2: edits and reactions are stored as records pointing at
+        // their message; `body` holds the sealed JSON content.
+        let has_kind = db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'kind'")?.exists([])?;
+        if !has_kind {
+            db.execute_batch(
+                "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+                 ALTER TABLE messages ADD COLUMN target_id TEXT;",
+            )?;
+        }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS messages_target ON messages (target_id);")?;
         Ok(Self { db, cipher, account })
     }
 
@@ -225,23 +237,28 @@ impl Store {
         Ok(())
     }
 
-    /// Stores messages; ones already stored keep their original content.
-    pub fn insert_messages(&self, channel: ChannelId, lines: &[ChatLine]) -> Result<(), StoreError> {
+    /// Stores records; ones already stored keep their original content.
+    pub fn insert(&self, channel: ChannelId, records: &[Record]) -> Result<(), StoreError> {
         let tx = self.db.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO messages (id, channel_id, author_id, created_at, body) VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO messages (id, channel_id, author_id, created_at, body, kind, target_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT (id) DO NOTHING",
             )?;
-            for line in lines {
-                let Some(id) = line.id else { continue };
-                let body = line.body.as_ref().map(|b| self.seal(&format!("msg:{id}"), b.as_bytes()));
+            for r in records {
+                let body = r.content.as_ref().map(|c| {
+                    let json = serde_json::to_vec(c).expect("content serializes");
+                    self.seal(&format!("msg:{}", r.id), &json)
+                });
                 stmt.execute(params![
-                    id.to_string(),
+                    r.id.to_string(),
                     channel.to_string(),
-                    line.author.to_string(),
-                    line.created_at,
-                    body
+                    r.author.to_string(),
+                    r.created_at,
+                    body,
+                    r.kind.as_str(),
+                    r.target.map(|t| t.to_string()),
                 ])?;
             }
         }
@@ -249,33 +266,69 @@ impl Store {
         Ok(())
     }
 
-    /// The newest `limit` messages of a channel, oldest first.
-    pub fn messages(&self, channel: ChannelId, limit: usize) -> Result<Vec<ChatLine>, StoreError> {
+    /// Forgets a deleted message with its edits and reactions.
+    pub fn delete(&self, message: MessageId) -> Result<(), StoreError> {
+        let id = message.to_string();
+        self.db.execute("DELETE FROM messages WHERE id = ?1 OR target_id = ?1", [&id])?;
+        Ok(())
+    }
+
+    fn row_to_record(
+        &self,
+        row: (String, String, i64, Option<Vec<u8>>, String, Option<String>),
+    ) -> Result<Record, StoreError> {
+        let (id, author, created_at, body, kind, target) = row;
+        let content = match body {
+            Some(sealed) => {
+                let plain = self.open_sealed(&format!("msg:{id}"), &sealed)?;
+                // Version 1 stored the bare text.
+                Some(serde_json::from_slice::<MessageContent>(&plain).unwrap_or_else(|_| MessageContent {
+                    body: String::from_utf8_lossy(&plain).into_owned(),
+                    ..Default::default()
+                }))
+            }
+            None => None,
+        };
+        Ok(Record {
+            id: MessageId(id.parse().map_err(|_| StoreError::Corrupt)?),
+            author: UserId(author.parse().map_err(|_| StoreError::Corrupt)?),
+            created_at,
+            kind: MessageKind::parse(&kind),
+            target: target.map(|t| t.parse().map(MessageId).map_err(|_| StoreError::Corrupt)).transpose()?,
+            content,
+        })
+    }
+
+    /// The newest `limit` messages of a channel plus their edits and reactions.
+    pub fn records(&self, channel: ChannelId, limit: usize) -> Result<Vec<Record>, StoreError> {
         let mut stmt = self.db.prepare_cached(
-            "SELECT id, author_id, created_at, body FROM messages WHERE channel_id = ?1 ORDER BY id DESC LIMIT ?2",
+            "WITH recent AS (
+                 SELECT id FROM messages WHERE channel_id = ?1 AND kind = 'message' ORDER BY id DESC LIMIT ?2
+             )
+             SELECT id, author_id, created_at, body, kind, target_id FROM messages
+             WHERE id IN (SELECT id FROM recent) OR target_id IN (SELECT id FROM recent)",
         )?;
         let rows = stmt.query_map(params![channel.to_string(), limit as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<Vec<u8>>>(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })?;
-        let mut lines = Vec::new();
+        let mut out = Vec::new();
         for row in rows {
-            let (id, author, created_at, body) = row?;
-            let body = match body {
-                Some(sealed) => Some(
-                    String::from_utf8(self.open_sealed(&format!("msg:{id}"), &sealed)?)
-                        .map_err(|_| StoreError::Corrupt)?,
-                ),
-                None => None,
-            };
-            lines.push(ChatLine {
-                id: Some(MessageId(id.parse().map_err(|_| StoreError::Corrupt)?)),
-                author: UserId(author.parse().map_err(|_| StoreError::Corrupt)?),
-                created_at,
-                body,
-            });
+            out.push(self.row_to_record(row?)?);
         }
-        lines.reverse();
-        Ok(lines)
+        Ok(out)
+    }
+
+    /// One stored message (e.g. the target of a reply), if present.
+    pub fn record(&self, id: MessageId) -> Result<Option<Record>, StoreError> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT id, author_id, created_at, body, kind, target_id FROM messages WHERE id = ?1",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .optional()?;
+        row.map(|r| self.row_to_record(r)).transpose()
     }
 
     /// ID of the newest stored message in a channel (to catch up from).
@@ -297,12 +350,14 @@ mod tests {
         Store::with_connection(Connection::open_in_memory().unwrap(), cipher, account).unwrap()
     }
 
-    fn line(body: Option<&str>) -> ChatLine {
-        ChatLine {
-            id: Some(MessageId::new()),
+    fn record(body: Option<&str>) -> Record {
+        Record {
+            id: MessageId::new(),
             author: UserId::new(),
             created_at: 1_700_000_000_000,
-            body: body.map(Into::into),
+            kind: MessageKind::Message,
+            target: None,
+            content: body.map(|b| MessageContent { body: b.into(), ..Default::default() }),
         }
     }
 
@@ -324,32 +379,60 @@ mod tests {
     }
 
     #[test]
-    fn messages_are_stored_once_in_order() {
+    fn records_are_stored_once_with_their_actions() {
         let s = store();
         let channel = ChannelId::new();
-        let (a, b, locked) = (line(Some("first")), line(Some("second")), line(None));
-        s.insert_messages(channel, &[a.clone(), b.clone(), locked.clone()]).unwrap();
-        // Re-inserting (e.g. a refetch that can't decrypt) keeps the stored text.
-        s.insert_messages(channel, &[ChatLine { body: None, ..a.clone() }]).unwrap();
+        let (a, b, locked) = (record(Some("first")), record(Some("second")), record(None));
+        let reaction = Record { kind: MessageKind::Reaction, target: Some(a.id), ..record(Some("")) };
+        s.insert(channel, &[a.clone(), b.clone(), locked.clone(), reaction.clone()]).unwrap();
+        // Re-inserting (e.g. a refetch that can't decrypt) keeps the stored content.
+        s.insert(channel, &[Record { content: None, ..a.clone() }]).unwrap();
 
-        assert_eq!(s.messages(channel, 10).unwrap(), vec![a.clone(), b.clone(), locked.clone()]);
-        assert_eq!(s.messages(channel, 2).unwrap(), vec![b, locked.clone()]);
-        assert_eq!(s.last_message_id(channel).unwrap(), locked.id);
-        assert!(s.messages(ChannelId::new(), 10).unwrap().is_empty());
+        let mut got = s.records(channel, 10).unwrap();
+        got.sort_by_key(|r| r.id.0);
+        let mut want = vec![a.clone(), b.clone(), locked.clone(), reaction.clone()];
+        want.sort_by_key(|r| r.id.0);
+        assert_eq!(got, want);
+        // The limit counts messages; their reactions come along.
+        let newest = s.records(channel, 2).unwrap();
+        assert_eq!(newest.len(), 2);
+        assert!(newest.iter().all(|r| r.id == b.id || r.id == locked.id));
+        assert_eq!(s.last_message_id(channel).unwrap(), Some(reaction.id));
+        assert_eq!(s.record(b.id).unwrap(), Some(b));
+
+        s.delete(a.id).unwrap();
+        assert!(s.records(channel, 10).unwrap().iter().all(|r| r.id != a.id && r.id != reaction.id));
+        assert!(s.records(ChannelId::new(), 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn version_one_rows_still_load() {
+        let s = store();
+        let channel = ChannelId::new();
+        let id = MessageId::new();
+        let sealed = s.seal(&format!("msg:{id}"), b"plain old text");
+        s.db.execute(
+            "INSERT INTO messages (id, channel_id, author_id, created_at, body) VALUES (?1, ?2, ?3, 1, ?4)",
+            params![id.to_string(), channel.to_string(), UserId::new().to_string(), sealed],
+        )
+        .unwrap();
+        let got = s.records(channel, 10).unwrap();
+        assert_eq!(got[0].content.as_ref().unwrap().body, "plain old text");
+        assert_eq!(got[0].kind, MessageKind::Message);
     }
 
     #[test]
     fn swapped_ciphertexts_are_rejected() {
         let s = store();
         let channel = ChannelId::new();
-        let (a, b) = (line(Some("from a")), line(Some("from b")));
-        s.insert_messages(channel, &[a.clone(), b.clone()]).unwrap();
+        let (a, b) = (record(Some("from a")), record(Some("from b")));
+        s.insert(channel, &[a.clone(), b.clone()]).unwrap();
         s.db.execute(
             "UPDATE messages SET body = (SELECT body FROM messages WHERE id = ?1) WHERE id = ?2",
-            params![a.id.unwrap().to_string(), b.id.unwrap().to_string()],
+            params![a.id.to_string(), b.id.to_string()],
         )
         .unwrap();
-        assert!(matches!(s.messages(channel, 10), Err(StoreError::Corrupt)));
+        assert!(matches!(s.records(channel, 10), Err(StoreError::Corrupt)));
     }
 
     #[test]

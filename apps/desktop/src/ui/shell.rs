@@ -1,21 +1,24 @@
-//! Main layout: server rail, channel sidebar with voice presence, the user
-//! panel, the content area and dialogs.
+//! Main layout: server rail, sidebar (guild channels or friends and DMs),
+//! the user panel, the content area and dialogs.
 
 use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
-use sivryn_client_core::protocol::ChannelId;
 use sivryn_client_core::protocol::model::ChannelKind;
+use sivryn_client_core::protocol::{ChannelId, GuildId, UserId};
 
+use super::guild_settings::{GuildIcon, GuildSettings};
 use super::icons::{Icon, Logo, Svg};
 use super::widgets::{Avatar, IconButton};
-use super::{AppState, Connection, Modal, SettingsPage, call, chat_view, settings_view};
+use super::{AppState, Connection, Modal, SettingsPage, call, chat_view, home, menu, profile, settings_view};
 use crate::i18n::t;
 
 #[component]
 pub fn Shell() -> Element {
     let state = use_context::<AppState>();
     let channel = *state.channel.read();
+    let home = *state.home.read();
     let in_call_here = state.call.read().as_ref().is_some_and(|c| Some(c.channel) == channel);
+    let drag = *state.drag_over.read();
 
     rsx! {
         div { class: "app",
@@ -26,10 +29,20 @@ pub fn Shell() -> Element {
                     div { class: "offline-bar", {t("shell.offline")} }
                 }
                 match channel.and_then(|c| state.channel_kind(c)) {
-                    Some(ChannelKind::Text) => rsx! { chat_view::ChatView { channel: channel.unwrap() } },
                     Some(ChannelKind::Voice) if in_call_here => rsx! { call::CallView {} },
                     Some(ChannelKind::Voice) => rsx! { call::JoinPrompt { channel: channel.unwrap() } },
+                    Some(_) => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },
+                    None if home => rsx! { home::FriendsPage {} },
                     None => rsx! { Welcome {} },
+                }
+                if drag {
+                    div { class: "drop-overlay",
+                        div { class: "drop-card",
+                            Svg { icon: Icon::Upload, size: 40 }
+                            div { class: "drop-title", {t("chat.drop_here")} }
+                            div { class: "muted", {t("chat.drop_hint")} }
+                        }
+                    }
                 }
             }
             if state.modal.read().is_some() {
@@ -64,35 +77,84 @@ fn Welcome() -> Element {
     }
 }
 
+fn select_guild(mut state: AppState, id: GuildId) {
+    let switching = *state.home.peek() || *state.guild.peek() != Some(id);
+    state.home.set(false);
+    if switching {
+        state.guild.set(Some(id));
+        // Back to the guild's first text channel, like other chat apps.
+        let first = state
+            .guilds
+            .peek()
+            .iter()
+            .find(|g| g.guild.id == id)
+            .and_then(|g| g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
+        state.channel.set(first);
+        if let Some(c) = first {
+            state.unread.write().remove(&c);
+        }
+        state.update_settings(|s| s.last_guild = Some(id));
+        spawn_forever(state.refresh_voice());
+    }
+}
+
 #[component]
 fn GuildRail() -> Element {
     let mut state = use_context::<AppState>();
-    let selected = *state.guild.read();
+    let home = *state.home.read();
+    let selected = if home { None } else { *state.guild.read() };
+    let unread = state.unread.read().clone();
+    let me = state.me();
+    // DMs with unread messages appear under the logo, like elsewhere.
+    let unread_dms: Vec<(ChannelId, String, Option<UserId>)> = state
+        .dms
+        .read()
+        .iter()
+        .filter(|d| unread.contains(&d.channel.id))
+        .map(|d| (d.channel.id, state.dm_title(d), d.members.iter().find(|u| Some(u.id) != me).map(|u| u.id)))
+        .collect();
+    let incoming = state.friends.read().incoming.len();
 
     rsx! {
         nav { class: "rail",
-            div { class: "rail-logo", Logo { size: 40 } }
+            div { class: "rail-entry",
+                div { class: if home { "rail-pill active" } else { "rail-pill" } }
+                div { class: if home { "rail-logo active" } else { "rail-logo" }, title: t("home.title"), onclick: move |_| state.open_home(),
+                    Logo { size: 48 }
+                    if incoming > 0 {
+                        span { class: "rail-badge", "{incoming}" }
+                    }
+                }
+            }
+            for (id, title, partner) in unread_dms {
+                div { key: "{id}", class: "rail-entry",
+                    div { class: "rail-pill unread" }
+                    div { class: "rail-dm", title: "{title}", onclick: move |_| state.open_channel(id),
+                        Avatar { name: title.clone(), id: partner, size: 48 }
+                    }
+                }
+            }
             div { class: "rail-sep" }
             for g in state.guilds.read().iter() {
-                div {
-                    key: "{g.guild.id}",
-                    class: "rail-entry",
-                    div { class: if Some(g.guild.id) == selected { "rail-pill active" } else { "rail-pill" } }
-                    div {
-                        class: if Some(g.guild.id) == selected { "rail-item active" } else { "rail-item" },
-                        title: "{g.guild.name}",
-                        onclick: {
-                            let id = g.guild.id;
-                            move |_| {
-                                if *state.guild.peek() != Some(id) {
-                                    state.guild.set(Some(id));
-                                    state.channel.set(None);
-                                    state.update_settings(|s| s.last_guild = Some(id));
-                                    spawn_forever(state.refresh_voice());
-                                }
+                {
+                    let id = g.guild.id;
+                    let active = Some(id) == selected;
+                    let has_unread = g.channels.iter().any(|c| unread.contains(&c.id));
+                    rsx! {
+                        div { key: "{id}", class: "rail-entry",
+                            div { class: if active { "rail-pill active" } else if has_unread { "rail-pill unread" } else { "rail-pill" } }
+                            div {
+                                class: if active { "rail-item active" } else { "rail-item" },
+                                title: "{g.guild.name}",
+                                onclick: move |_| select_guild(state, id),
+                                onmousedown: move |e| {
+                                    if let Some((x, y)) = menu::right_click(&e) {
+                                        menu::open(state, x, y, menu::guild_items(state, id));
+                                    }
+                                },
+                                GuildIcon { name: g.guild.name.clone(), icon: g.guild.icon_id, size: 48 }
                             }
-                        },
-                        "{initials(&g.guild.name)}"
+                        }
                     }
                 }
             }
@@ -115,6 +177,16 @@ fn GuildRail() -> Element {
 #[component]
 fn Sidebar() -> Element {
     let mut state = use_context::<AppState>();
+    if *state.home.read() {
+        return rsx! {
+            aside { class: "sidebar",
+                div { class: "sidebar-header", span { class: "guild-title", {t("home.title")} } }
+                home::HomeSidebar {}
+                VoicePanel {}
+                UserPanel {}
+            }
+        };
+    }
     let guilds = state.guilds.read();
     let Some(guild) = guilds.iter().find(|g| Some(g.guild.id) == *state.guild.read()) else {
         return rsx! {
@@ -126,22 +198,28 @@ fn Sidebar() -> Element {
             }
         };
     };
+    let guild_id = guild.guild.id;
     let selected = *state.channel.read();
     let unread = state.unread.read();
     let voice = state.voice.read();
     let call = state.call.read();
     let text: Vec<_> = guild.channels.iter().filter(|c| c.kind == ChannelKind::Text).cloned().collect();
     let voice_channels: Vec<_> = guild.channels.iter().filter(|c| c.kind == ChannelKind::Voice).cloned().collect();
+    let afk = guild.guild.afk_channel_id;
     let mut open = move |id: ChannelId| {
         state.channel.set(Some(id));
         state.unread.write().remove(&id);
     };
+    let guild_menu = move |e: MouseEvent| {
+        let p = e.client_coordinates();
+        menu::open(state, p.x, p.y + 12.0, menu::guild_items(state, guild_id));
+    };
 
     rsx! {
         aside { class: "sidebar",
-            div { class: "sidebar-header",
+            div { class: "sidebar-header clickable", onclick: guild_menu,
                 span { class: "guild-title", "{guild.guild.name}" }
-                IconButton { icon: Icon::UserPlus, size: 18, title: t("shell.invite"), onclick: move |_| state.modal.set(Some(Modal::Invite)) }
+                Svg { icon: Icon::ChevronDown, size: 18 }
             }
             div { class: "channel-list",
                 div { class: "category", {t("shell.text_channels")} }
@@ -150,6 +228,11 @@ fn Sidebar() -> Element {
                         key: "{c.id}",
                         class: if Some(c.id) == selected { "channel active" } else if unread.contains(&c.id) { "channel unread" } else { "channel" },
                         onclick: move |_| open(c.id),
+                        onmousedown: move |e| {
+                            if let Some((x, y)) = menu::right_click(&e) {
+                                menu::open(state, x, y, menu::channel_items(state, c.id));
+                            }
+                        },
                         Svg { icon: Icon::Hash, size: 18 }
                         span { class: "channel-name", "{c.name}" }
                         if unread.contains(&c.id) && Some(c.id) != selected {
@@ -165,6 +248,9 @@ fn Sidebar() -> Element {
                             onclick: move |_| open(c.id),
                             Svg { icon: Icon::Volume, size: 18 }
                             span { class: "channel-name", "{c.name}" }
+                            if afk == Some(c.id) {
+                                span { class: "afk-badge", "AFK" }
+                            }
                         }
                         div { class: "voice-members",
                             // While connected, the live room is more current than the server's list.
@@ -174,6 +260,7 @@ fn Sidebar() -> Element {
                                         key: "{p.identity}",
                                         name: p.name.clone(),
                                         id: p.identity.parse().ok(),
+                                        channel: c.id,
                                         muted: p.muted,
                                         sharing: p.sharing,
                                         speaking: live.speakers.contains(&p.identity),
@@ -185,6 +272,7 @@ fn Sidebar() -> Element {
                                         key: "{p.user_id}",
                                         name: state.username(p.user_id),
                                         id: Some(p.user_id),
+                                        channel: c.id,
                                         muted: p.muted,
                                         sharing: p.screen_sharing,
                                         speaking: false,
@@ -204,13 +292,21 @@ fn Sidebar() -> Element {
 #[component]
 fn VoiceMember(
     name: String,
-    id: Option<sivryn_client_core::protocol::UserId>,
+    id: Option<UserId>,
+    channel: ChannelId,
     muted: bool,
     sharing: bool,
     speaking: bool,
 ) -> Element {
+    let state = use_context::<AppState>();
     rsx! {
-        div { class: "voice-member",
+        div {
+            class: "voice-member",
+            onmousedown: move |e| {
+                if let (Some(user), Some((x, y))) = (id, menu::right_click(&e)) {
+                    menu::open(state, x, y, menu::user_items(state, user, state.guild_of(channel), Some(channel)));
+                }
+            },
             Avatar { name: name.clone(), id, size: 22, speaking }
             span { class: "voice-member-name", "{name}" }
             if sharing {
@@ -334,8 +430,73 @@ fn ModalView() -> Element {
     match *state.modal.read() {
         Some(Modal::PickScreen) => rsx! { call::ScreenPicker {} },
         Some(Modal::Invite) => rsx! { InviteDialog {} },
-        Some(modal) => rsx! { GuildDialog { key: "{modal as u8}", modal } },
+        Some(Modal::GuildSettings(guild)) => rsx! { GuildSettings { guild } },
+        Some(Modal::NewDm) => rsx! { home::PickPeople { channel: None } },
+        Some(Modal::AddToDm(channel)) => rsx! { home::PickPeople { channel: Some(channel) } },
+        Some(Modal::ConfirmDelete(channel, message)) => rsx! { chat_view::ConfirmDelete { channel, message } },
+        Some(Modal::Profile(user)) => rsx! { profile::ProfileDialog { key: "{user}", user } },
+        Some(Modal::ConfirmModeration { guild, user, ban }) => rsx! { ConfirmModeration { guild, user, ban } },
+        Some(modal) => rsx! { GuildDialog { key: "{modal:?}", modal } },
         None => rsx! {},
+    }
+}
+
+/// Asks before kicking or banning someone; bans take an optional reason.
+#[component]
+fn ConfirmModeration(guild: GuildId, user: UserId, ban: bool) -> Element {
+    let mut state = use_context::<AppState>();
+    let mut reason = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let name = state.username(user);
+    let server = state.guild(guild).map(|g| g.name).unwrap_or_default();
+    let (title, hint, action) = if ban {
+        (t("moderation.ban_title"), t("moderation.ban_hint"), t("menu.ban"))
+    } else {
+        (t("moderation.kick_title"), t("moderation.kick_hint"), t("menu.kick"))
+    };
+    let confirm = move |_| {
+        let Some(s) = state.session.cloned() else { return };
+        if *busy.peek() {
+            return;
+        }
+        busy.set(true);
+        let reason = reason.peek().trim().to_owned();
+        spawn_forever(async move {
+            let result = if ban {
+                s.api.ban(guild, user, Some(reason).filter(|r| !r.is_empty())).await
+            } else {
+                s.api.remove_member(guild, user).await
+            };
+            busy.set(false);
+            match result {
+                Ok(()) => state.modal.set(None),
+                Err(e) => state.report(Err(e.to_string())),
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "overlay", onclick: move |_| state.modal.set(None),
+            div { class: "dialog", onclick: move |e| e.stop_propagation(),
+                div { class: "dialog-header",
+                    h2 { "{title}" }
+                    IconButton { icon: Icon::X, size: 18, onclick: move |_| state.modal.set(None) }
+                }
+                p { class: "muted", strong { "{name}" } " – {server}. {hint}" }
+                if ban {
+                    input {
+                        class: "input",
+                        value: "{reason}",
+                        placeholder: t("moderation.reason"),
+                        oninput: move |e| reason.set(e.value()),
+                    }
+                }
+                div { class: "dialog-actions",
+                    button { class: "button ghost", onclick: move |_| state.modal.set(None), {t("common.cancel")} }
+                    button { class: if *busy.read() { "button danger busy" } else { "button danger" }, onclick: confirm, "{action}" }
+                }
+            }
+        }
     }
 }
 
@@ -410,6 +571,7 @@ fn GuildDialog(modal: Modal) -> Element {
             match result {
                 Ok(g) => {
                     let id = g.guild.id;
+                    state.home.set(false);
                     state.guild.set(Some(id));
                     state.channel.set(g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
                     state.update_settings(|s| s.last_guild = Some(id));
@@ -456,8 +618,4 @@ fn GuildDialog(modal: Modal) -> Element {
             }
         }
     }
-}
-
-fn initials(name: &str) -> String {
-    name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase()
 }

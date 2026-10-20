@@ -714,22 +714,27 @@ impl Node {
     /// TODO: z-index
     /// (If multiple children are positioned at the position then a random one will be recursed into)
     pub fn hit(&self, x: f32, y: f32) -> Option<HitResult> {
-        let mut x = x - self.final_layout.location.x + self.scroll_offset.x as f32;
-        let mut y = y - self.final_layout.location.y + self.scroll_offset.y as f32;
-
+        // Sivryn patch: test the node's own box *before* applying its scroll
+        // offset. Upstream added the offset first, so a point above or beside
+        // a scrolled container (e.g. a chat log scrolled to the bottom) fell
+        // into its scrolled content and the click went to a hidden child.
+        let box_x = x - self.final_layout.location.x;
+        let box_y = y - self.final_layout.location.y;
         let size = self.final_layout.size;
-        let matches_self = !(x < 0.0
-            || x > size.width + self.scroll_offset.x as f32
-            || y < 0.0
-            || y > size.height + self.scroll_offset.y as f32);
+        let matches_self = !(box_x < 0.0 || box_x > size.width || box_y < 0.0 || box_y > size.height);
 
+        let mut x = box_x + self.scroll_offset.x as f32;
+        let mut y = box_y + self.scroll_offset.y as f32;
         let content_size = self.final_layout.content_size;
-        let matches_content = !(x < 0.0
-            || x > content_size.width + self.scroll_offset.x as f32
-            || y < 0.0
-            || y > content_size.height + self.scroll_offset.y as f32);
+        let matches_content =
+            !(x < 0.0 || x > content_size.width || y < 0.0 || y > content_size.height);
 
-        if !matches_self && !matches_content {
+        // Content overflowing a clipping (scrolling or hidden) box is invisible.
+        let clips = self.primary_styles().is_some_and(|s| {
+            !matches!(s.clone_overflow_x(), style::values::computed::Overflow::Visible)
+                || !matches!(s.clone_overflow_y(), style::values::computed::Overflow::Visible)
+        });
+        if !matches_self && (clips || !matches_content) {
             return None;
         }
 

@@ -265,7 +265,9 @@ impl CustomPaintSource for VideoSurface {
         }
         let gpu = self.gpu.as_mut()?;
 
-        if self.frames.has_changed().unwrap_or(false) {
+        // A still image only has the channel's initial value, which
+        // `has_changed` never reports; take it when nothing is shown yet.
+        if gpu.frame.is_none() || self.frames.has_changed().unwrap_or(false) {
             let latest = self.frames.borrow_and_update().clone();
             if let Some(frame) = latest {
                 if gpu.frame.is_none() {

@@ -17,7 +17,7 @@ FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin sivryn
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin sivryn \n    && mkdir -p /data/files && chown -R sivryn /data
 COPY --from=build /sivryn-server /usr/local/bin/sivryn-server
 EXPOSE 8080
 USER sivryn

@@ -21,6 +21,9 @@ services:
       SIVRYN_LIVEKIT_URL: wss://${SIVRYN_DOMAIN}
       # Voice presence (who is in which channel) is read from LiveKit's API directly.
       SIVRYN_LIVEKIT_API_URL: http://livekit:7880
+    volumes:
+      # Uploaded files (encrypted attachments, server icons).
+      - files:/data/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,5 +89,6 @@ services:
 
 volumes:
   postgres:
+  files:
   caddy_data:
   caddy_config:

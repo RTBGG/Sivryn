@@ -81,8 +81,15 @@ impl TestApp {
             camera: CameraLimits::default(),
             nats_url: None,
             oidc: None,
+            files_dir: std::env::temp_dir().join(format!("sivryn-test-files-{schema}")),
+            max_upload_bytes: 1024 * 1024,
         };
-        let state = AppState { db: db.clone(), config: Arc::new(config), events: EventBus::in_process() };
+        let state = AppState {
+            db: db.clone(),
+            config: Arc::new(config),
+            events: EventBus::in_process(),
+            presence: Default::default(),
+        };
         tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
 
         Some(Self { url: format!("http://{addr}"), db, http: reqwest::Client::new(), admin, schema })
@@ -136,6 +143,48 @@ impl TestApp {
         let (status, json) = self.get(path, token).await;
         assert!(status.is_success(), "GET {path} failed with {status}: {json}");
         serde_json::from_value(json).unwrap()
+    }
+
+    pub async fn put(&self, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+        self.request(reqwest::Method::PUT, path, Some(token), Some(&body)).await
+    }
+
+    pub async fn patch(&self, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+        self.request(reqwest::Method::PATCH, path, Some(token), Some(&body)).await
+    }
+
+    pub async fn delete(&self, path: &str, token: &str) -> (StatusCode, Value) {
+        self.request::<()>(reqwest::Method::DELETE, path, Some(token), None).await
+    }
+
+    /// Sends raw bytes (uploads) and returns status and JSON.
+    pub async fn send_bytes(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        token: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let resp = self
+            .http
+            .request(method, format!("{}/api/v1{path}", self.url))
+            .bearer_auth(token)
+            .header("content-type", content_type)
+            .body(bytes)
+            .send()
+            .await
+            .expect("request sent");
+        let status = resp.status();
+        let text = resp.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// GETs raw bytes.
+    pub async fn get_bytes(&self, path: &str, token: &str) -> (StatusCode, Vec<u8>) {
+        let resp =
+            self.http.get(format!("{}/api/v1{path}", self.url)).bearer_auth(token).send().await.expect("request sent");
+        (resp.status(), resp.bytes().await.unwrap().to_vec())
     }
 
     pub async fn try_register(&self, username: &str, invite_code: Option<&str>) -> (StatusCode, Value) {

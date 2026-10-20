@@ -2,8 +2,8 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sivryn_protocol::api::*;
-use sivryn_protocol::model::{Channel, Message, User};
-use sivryn_protocol::{ChannelId, DeviceId, GuildId, UserId};
+use sivryn_protocol::model::{Channel, Guild, Message, User};
+use sivryn_protocol::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -82,6 +82,10 @@ impl ApiClient {
         if let Some(body) = body {
             req = req.json(body);
         }
+        Self::finish(req).await
+    }
+
+    async fn finish<R: DeserializeOwned>(req: reqwest::RequestBuilder) -> Result<R, ClientError> {
         let resp = req.send().await?;
         let status = resp.status();
         if status.is_success() {
@@ -104,6 +108,23 @@ impl ApiClient {
 
     async fn post<B: Serialize, R: DeserializeOwned>(&self, path: &str, body: &B) -> Result<R, ClientError> {
         self.request(Method::POST, path, Some(body), true).await
+    }
+
+    async fn put<B: Serialize, R: DeserializeOwned>(&self, path: &str, body: &B) -> Result<R, ClientError> {
+        self.request(Method::PUT, path, Some(body), true).await
+    }
+
+    async fn patch<B: Serialize, R: DeserializeOwned>(&self, path: &str, body: &B) -> Result<R, ClientError> {
+        self.request(Method::PATCH, path, Some(body), true).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<(), ClientError> {
+        self.request::<(), ()>(Method::DELETE, path, None, true).await
+    }
+
+    fn authed(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder, ClientError> {
+        let token = self.token.as_deref().ok_or(ClientError::NotLoggedIn)?;
+        Ok(self.http.request(method, format!("{}/api/v1{path}", self.base)).bearer_auth(token))
     }
 
     pub async fn instance_info(&self) -> Result<InstanceInfo, ClientError> {
@@ -215,5 +236,143 @@ impl ApiClient {
 
     pub async fn join_voice(&self, channel: ChannelId) -> Result<VoiceJoinResponse, ClientError> {
         self.post(&format!("/channels/{channel}/voice/join"), &()).await
+    }
+}
+
+/// Social features, moderation and files.
+impl ApiClient {
+    pub async fn profile(&self, user: UserId) -> Result<UserProfile, ClientError> {
+        self.get(&format!("/users/{user}")).await
+    }
+
+    /// Users you can see who are online right now.
+    pub async fn presence(&self) -> Result<Vec<UserId>, ClientError> {
+        self.get("/presence").await
+    }
+
+    pub async fn me_settings(&self) -> Result<MeSettings, ClientError> {
+        self.get("/users/@me/settings").await
+    }
+
+    pub async fn update_me(&self, req: &UpdateMeRequest) -> Result<MeSettings, ClientError> {
+        self.patch("/users/@me", req).await
+    }
+
+    pub async fn friends(&self) -> Result<FriendsResponse, ClientError> {
+        self.get("/friends").await
+    }
+
+    pub async fn send_friend_request(&self, username: &str) -> Result<(), ClientError> {
+        self.post("/friends/requests", &FriendRequest { username: username.into() }).await
+    }
+
+    pub async fn accept_friend(&self, user: UserId) -> Result<(), ClientError> {
+        self.post(&format!("/friends/requests/{user}/accept"), &()).await
+    }
+
+    /// Declines an incoming or cancels an outgoing request.
+    pub async fn cancel_friend_request(&self, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/friends/requests/{user}")).await
+    }
+
+    pub async fn remove_friend(&self, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/friends/{user}")).await
+    }
+
+    pub async fn block(&self, user: UserId) -> Result<(), ClientError> {
+        self.put(&format!("/blocks/{user}"), &()).await
+    }
+
+    pub async fn unblock(&self, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/blocks/{user}")).await
+    }
+
+    pub async fn dms(&self) -> Result<Vec<DmChannel>, ClientError> {
+        self.get("/dms").await
+    }
+
+    pub async fn open_dm(&self, users: Vec<UserId>) -> Result<DmChannel, ClientError> {
+        self.post("/dms", &OpenDmRequest { user_ids: users }).await
+    }
+
+    pub async fn add_dm_member(&self, channel: ChannelId, user: UserId) -> Result<DmChannel, ClientError> {
+        self.post(&format!("/dms/{channel}/members"), &AddDmMemberRequest { user_id: user }).await
+    }
+
+    pub async fn leave_dm(&self, channel: ChannelId) -> Result<(), ClientError> {
+        self.delete(&format!("/dms/{channel}/members/@me")).await
+    }
+
+    pub async fn rename_dm(&self, channel: ChannelId, name: &str) -> Result<DmChannel, ClientError> {
+        self.patch(&format!("/dms/{channel}"), &RenameDmRequest { name: name.into() }).await
+    }
+
+    pub async fn channel_members(&self, channel: ChannelId) -> Result<Vec<User>, ClientError> {
+        self.get(&format!("/channels/{channel}/members")).await
+    }
+
+    pub async fn update_guild(&self, guild: GuildId, req: &UpdateGuildRequest) -> Result<Guild, ClientError> {
+        self.patch(&format!("/guilds/{guild}"), req).await
+    }
+
+    pub async fn set_guild_icon(
+        &self,
+        guild: GuildId,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<UploadedFile, ClientError> {
+        let req = self
+            .authed(Method::PUT, &format!("/guilds/{guild}/icon"))?
+            .header("content-type", content_type)
+            .body(bytes);
+        Self::finish(req).await
+    }
+
+    /// Kicks a member, or leaves the guild when `user` is yourself.
+    pub async fn remove_member(&self, guild: GuildId, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/guilds/{guild}/members/{user}")).await
+    }
+
+    pub async fn bans(&self, guild: GuildId) -> Result<Vec<Ban>, ClientError> {
+        self.get(&format!("/guilds/{guild}/bans")).await
+    }
+
+    pub async fn ban(&self, guild: GuildId, user: UserId, reason: Option<String>) -> Result<(), ClientError> {
+        self.put(&format!("/guilds/{guild}/bans/{user}"), &BanRequest { reason }).await
+    }
+
+    pub async fn unban(&self, guild: GuildId, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/guilds/{guild}/bans/{user}")).await
+    }
+
+    pub async fn delete_message(&self, channel: ChannelId, message: MessageId) -> Result<(), ClientError> {
+        self.delete(&format!("/channels/{channel}/messages/{message}")).await
+    }
+
+    /// Uploads an (already encrypted) attachment.
+    pub async fn upload_attachment(&self, channel: ChannelId, bytes: Vec<u8>) -> Result<UploadedFile, ClientError> {
+        let req = self
+            .authed(Method::POST, &format!("/channels/{channel}/attachments"))?
+            .header("content-type", "application/octet-stream")
+            .body(bytes);
+        Self::finish(req).await
+    }
+
+    pub async fn download_file(&self, file: FileId) -> Result<Vec<u8>, ClientError> {
+        let resp = self.authed(Method::GET, &format!("/files/{file}"))?.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ClientError::Api { status, code: "download".into(), message: "file unavailable".into() });
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    pub async fn channel_voice_state(&self, channel: ChannelId) -> Result<VoiceChannelState, ClientError> {
+        self.get(&format!("/channels/{channel}/voice")).await
+    }
+
+    /// Disconnects someone from a guild voice channel (needs `MOVE_MEMBERS`).
+    pub async fn disconnect_voice(&self, channel: ChannelId, user: UserId) -> Result<(), ClientError> {
+        self.delete(&format!("/channels/{channel}/voice/{user}")).await
     }
 }

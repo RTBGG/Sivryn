@@ -21,7 +21,10 @@ your GPU can encode it, and limits that you as the admin control.
   voices back. Cameras are published with simulcast.
 - **End-to-end encryption.** Text channels use MLS (RFC 9420). Voice and video can be
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
-- **Familiar model:** servers (guilds), text and voice channels, roles, permissions and invites.
+- **Familiar model:** servers (guilds), text and voice channels, roles, permissions, invites,
+  bans and an AFK channel. Friends, direct messages and group chats with voice, video and screen
+  sharing. Replies, edits, reactions, emoji, link previews and files (images, GIFs, videos with
+  an inline player), all end-to-end encrypted.
 - **Easy to self-host:** Docker Compose with automatic HTTPS via Caddy, PostgreSQL and LiveKit.
   Media runs on two ports.
 - **Native desktop client** built with Dioxus Native: a GPU-rendered UI with no webview,
@@ -43,6 +46,10 @@ docker compose up -d
 Open the desktop app, enter `https://your.domain` and register. The first account becomes the
 instance admin. Registration defaults to invite-only. Change `SIVRYN_REGISTRATION` in
 `deploy/.env` to `open` or `closed` as you like.
+
+Files sent in chats are stored encrypted on the `files` volume (only ciphertext; the keys
+travel inside the encrypted messages). `SIVRYN_MAX_UPLOAD_MB` limits the size per file
+(default 100).
 
 If you already run a reverse proxy, remove `caddy` from `COMPOSE_PROFILES` and proxy
 `/rtc*` and `/twirp*` to `127.0.0.1:7880` (LiveKit) and everything else to
@@ -138,7 +145,8 @@ build the image itself.
 - [x] Screen share audio (WASAPI process loopback), camera, device selection, per-user volume
 - [x] Settings, global hotkeys, dark/light theme, German/English UI
 - [ ] Verify across real networks (NAT, TURN) with several people
-- [ ] OIDC login, rate limiting, file attachments, message editing and replies
+- [x] Friends, DMs and group calls, replies, edits, reactions, emoji, encrypted files and link previews
+- [ ] OIDC login, rate limiting, search
 - [ ] Linux and macOS clients, browser client, mobile
 
 ## License

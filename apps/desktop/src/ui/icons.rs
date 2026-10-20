@@ -40,6 +40,28 @@ pub enum Icon {
     Volume,
     X,
     Bell,
+    AtSign,
+    Ban,
+    ChevronRight,
+    CirclePlus,
+    Copy,
+    Download,
+    External,
+    File,
+    Image,
+    Link,
+    Message,
+    Pause,
+    Pencil,
+    Phone,
+    Play,
+    Reply,
+    Search,
+    Smile,
+    Trash,
+    Upload,
+    UserMinus,
+    Users,
 }
 
 /// Shapes in a 24×24 box, stroked with width 2 and round caps/joins.
@@ -152,6 +174,57 @@ fn shapes(icon: Icon) -> &'static [Shape] {
         ],
         Icon::X => &[Path("M18 6 6 18"), Path("m6 6 12 12")],
         Icon::Bell => &[Path("M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"), Path("M10.3 21a1.94 1.94 0 0 0 3.4 0")],
+        Icon::AtSign => &[Circle(12.0, 12.0, 4.0), Path("M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8")],
+        Icon::Ban => &[Circle(12.0, 12.0, 10.0), Path("m4.9 4.9 14.2 14.2")],
+        Icon::ChevronRight => &[Path("m9 18 6-6-6-6")],
+        Icon::CirclePlus => &[Circle(12.0, 12.0, 10.0), Path("M8 12h8"), Path("M12 8v8")],
+        Icon::Copy => {
+            &[Rect(8.0, 8.0, 14.0, 14.0, 2.0), Path("M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2")]
+        }
+        Icon::Download => &[Path("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), Path("m7 10 5 5 5-5"), Path("M12 15V3")],
+        Icon::External => {
+            &[Path("M15 3h6v6"), Path("M10 14 21 3"), Path("M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6")]
+        }
+        Icon::File => {
+            &[Path("M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"), Path("M14 2v4a2 2 0 0 0 2 2h4")]
+        }
+        Icon::Image => {
+            &[Rect(3.0, 3.0, 18.0, 18.0, 2.0), Circle(9.0, 9.0, 2.0), Path("m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21")]
+        }
+        Icon::Link => &[
+            Path("M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"),
+            Path("M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"),
+        ],
+        Icon::Message => &[Path("M7.9 20A9 9 0 1 0 4 16.1L2 22Z")],
+        Icon::Pause => &[Rect(14.0, 4.0, 4.0, 16.0, 1.0), Rect(6.0, 4.0, 4.0, 16.0, 1.0)],
+        Icon::Pencil => &[
+            Path(
+                "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+            ),
+            Path("m15 5 4 4"),
+        ],
+        Icon::Phone => &[Path(
+            "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z",
+        )],
+        Icon::Play => &[Path("m6 3 14 9-14 9V3z")],
+        Icon::Reply => &[Path("m9 17-5-5 5-5"), Path("M20 18v-2a4 4 0 0 0-4-4H4")],
+        Icon::Search => &[Circle(11.0, 11.0, 8.0), Path("m21 21-4.3-4.3")],
+        Icon::Smile => {
+            &[Circle(12.0, 12.0, 10.0), Path("M8 14s1.5 2 4 2 4-2 4-2"), Path("M9 9h.01"), Path("M15 9h.01")]
+        }
+        Icon::Trash => {
+            &[Path("M3 6h18"), Path("M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"), Path("M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2")]
+        }
+        Icon::Upload => &[Path("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), Path("m17 8-5-5-5 5"), Path("M12 3v12")],
+        Icon::UserMinus => {
+            &[Path("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"), Circle(9.0, 7.0, 4.0), Path("M22 11h-6")]
+        }
+        Icon::Users => &[
+            Path("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"),
+            Circle(9.0, 7.0, 4.0),
+            Path("M22 21v-2a4 4 0 0 0-3-3.87"),
+            Path("M16 3.13a4 4 0 0 1 0 7.75"),
+        ],
     }
 }
 

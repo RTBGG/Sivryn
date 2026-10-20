@@ -14,4 +14,4 @@ pub mod permissions;
 pub use ids::*;
 
 /// Version of the gateway protocol. Bumped on breaking changes.
-pub const GATEWAY_VERSION: u32 = 1;
+pub const GATEWAY_VERSION: u32 = 2;

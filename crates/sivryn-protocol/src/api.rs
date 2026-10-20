@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::media::{CameraLimits, ScreenShareLimits};
-use crate::model::{Channel, ChannelKind, Guild, Message, User};
-use crate::{ChannelId, DeviceId, MessageId, UserId};
+use crate::model::{Channel, ChannelKind, Guild, Message, MessageKind, User};
+use crate::permissions::Permissions;
+use crate::{ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorBody {
@@ -67,6 +68,9 @@ pub struct CreateChannelRequest {
 pub struct GuildWithChannels {
     pub guild: Guild,
     pub channels: Vec<Channel>,
+    /// The requesting user's permissions in this guild.
+    #[serde(default = "Permissions::empty")]
+    pub permissions: Permissions,
 }
 
 /// `POST /api/v1/channels/{id}/messages`: send an MLS-encrypted message.
@@ -75,6 +79,11 @@ pub struct SendMessageRequest {
     pub device_id: DeviceId,
     pub epoch: u64,
     pub ciphertext: String,
+    #[serde(default)]
+    pub kind: MessageKind,
+    /// Required for edits and reactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<MessageId>,
 }
 
 /// `GET /api/v1/channels/{id}/messages?before=&after=&limit=`
@@ -187,4 +196,136 @@ pub struct VoiceParticipant {
     pub muted: bool,
     pub camera: bool,
     pub screen_sharing: bool,
+}
+
+// --- Users, friends and blocks -----------------------------------------------
+
+/// How the requesting user relates to another user.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relationship {
+    #[default]
+    None,
+    Friend,
+    /// They sent you a friend request.
+    Incoming,
+    /// You sent them a friend request.
+    Outgoing,
+    /// You blocked them.
+    Blocked,
+}
+
+/// `GET /api/v1/users/{id}`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub user: User,
+    pub relationship: Relationship,
+    pub mutual_guilds: Vec<GuildId>,
+}
+
+/// `GET /api/v1/friends`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FriendsResponse {
+    pub friends: Vec<User>,
+    pub incoming: Vec<User>,
+    pub outgoing: Vec<User>,
+    pub blocked: Vec<User>,
+}
+
+/// `POST /api/v1/friends/requests`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriendRequest {
+    pub username: String,
+}
+
+/// `PATCH /api/v1/users/@me`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateMeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_server_dms: Option<bool>,
+}
+
+/// `GET /api/v1/users/@me/settings`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeSettings {
+    pub allow_server_dms: bool,
+}
+
+// --- Direct and group messages ------------------------------------------------
+
+/// `GET /api/v1/dms`: a DM or group with its members.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DmChannel {
+    pub channel: Channel,
+    pub members: Vec<User>,
+}
+
+/// `POST /api/v1/dms`: one user opens (or reuses) a DM, several make a group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpenDmRequest {
+    pub user_ids: Vec<UserId>,
+}
+
+/// `POST /api/v1/dms/{id}/members`. Adding someone to a 1:1 DM creates a new
+/// group with all three, like Discord.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AddDmMemberRequest {
+    pub user_id: UserId,
+}
+
+/// `PATCH /api/v1/dms/{id}`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenameDmRequest {
+    pub name: String,
+}
+
+// --- Guild management -----------------------------------------------------------
+
+/// `PATCH /api/v1/guilds/{id}`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateGuildRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `Some(None)` clears the AFK channel.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub afk_channel_id: Option<Option<ChannelId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub afk_timeout_minutes: Option<u32>,
+}
+
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(v: &Option<Option<T>>, s: S) -> Result<S::Ok, S::Error> {
+        v.as_ref().expect("skipped when None").serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
+}
+
+/// `GET /api/v1/guilds/{id}/bans`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ban {
+    pub user: User,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `PUT /api/v1/guilds/{id}/bans/{user}`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BanRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+// --- Files --------------------------------------------------------------------------
+
+/// Response of `POST /api/v1/channels/{id}/attachments` (body: the encrypted
+/// bytes) and `PUT /api/v1/guilds/{id}/icon` (body: the image).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct UploadedFile {
+    pub id: FileId,
+    pub size: u64,
 }

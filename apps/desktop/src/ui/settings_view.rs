@@ -14,8 +14,9 @@ use crate::hotkeys::Keybind;
 use crate::i18n::t;
 use crate::settings::{Keybinds, Language, ScreenQuality, Theme};
 
-const PAGES: [(SettingsPage, Icon, &str); 7] = [
+const PAGES: [(SettingsPage, Icon, &str); 8] = [
     (SettingsPage::Account, Icon::User, "settings.account"),
+    (SettingsPage::Privacy, Icon::Lock, "settings.privacy"),
     (SettingsPage::Voice, Icon::Mic, "settings.voice"),
     (SettingsPage::Video, Icon::Video, "settings.video"),
     (SettingsPage::Keybinds, Icon::Keyboard, "settings.keybinds"),
@@ -52,6 +53,7 @@ pub fn SettingsView() -> Element {
                 div { class: "settings-content",
                     match page {
                         SettingsPage::Account => rsx! { AccountPage {} },
+                        SettingsPage::Privacy => rsx! { PrivacyPage {} },
                         SettingsPage::Voice => rsx! { VoicePage {} },
                         SettingsPage::Video => rsx! { VideoPage {} },
                         SettingsPage::Keybinds => rsx! { KeybindsPage {} },
@@ -515,6 +517,83 @@ fn AppearancePage() -> Element {
             hint: t("appearance.compact_hint").to_string(),
             on: appearance.compact,
             onchange: move |v| state.update_settings(|s| s.appearance.compact = v),
+        }
+    }
+}
+
+#[component]
+fn PrivacyPage() -> Element {
+    let state = use_context::<AppState>();
+    let settings = state.settings.read().clone();
+    // The server keeps who may message you; load it once.
+    let mut allow_server_dms = use_signal(|| None::<bool>);
+    use_hook(move || {
+        let Some(s) = state.session.cloned() else { return };
+        spawn(async move {
+            match s.api.me_settings().await {
+                Ok(me) => allow_server_dms.set(Some(me.allow_server_dms)),
+                Err(e) => state.report(Err(e.to_string())),
+            }
+        });
+    });
+    let set_allow = move |v: bool| {
+        let Some(s) = state.session.cloned() else { return };
+        let before = *allow_server_dms.peek();
+        allow_server_dms.set(Some(v));
+        spawn(async move {
+            let req = sivryn_client_core::protocol::api::UpdateMeRequest { allow_server_dms: Some(v) };
+            if let Err(e) = s.api.update_me(&req).await {
+                allow_server_dms.set(before);
+                state.report(Err(e.to_string()));
+            }
+        });
+    };
+    let blocked = state.friends.read().blocked.clone();
+
+    rsx! {
+        h1 { class: "section-title", {t("settings.privacy")} }
+        if let Some(allow) = *allow_server_dms.read() {
+            ToggleRow {
+                label: t("privacy.server_dms").to_string(),
+                hint: t("privacy.server_dms_hint").to_string(),
+                on: allow,
+                onchange: set_allow,
+            }
+        }
+        ToggleRow {
+            label: t("privacy.link_previews").to_string(),
+            hint: t("privacy.link_previews_hint").to_string(),
+            on: settings.link_previews,
+            onchange: move |v| state.update_settings(|s| s.link_previews = v),
+        }
+        Field { label: t("privacy.blocked").to_string(),
+            if blocked.is_empty() {
+                div { class: "muted", {t("privacy.blocked_none")} }
+            }
+            div { class: "user-rows",
+                for u in blocked {
+                    div { key: "{u.id}", class: "user-row",
+                        Avatar { name: u.display_name.clone().unwrap_or_else(|| u.username.clone()), id: Some(u.id), size: 32 }
+                        span { class: "user-row-name", "{u.display_name.clone().unwrap_or_else(|| u.username.clone())}" }
+                        span { class: "muted small", "@{u.username}" }
+                        span { class: "topbar-spacer" }
+                        button {
+                            class: "button small",
+                            onclick: {
+                                let id = u.id;
+                                move |_| {
+                                    let Some(s) = state.session.cloned() else { return };
+                                    spawn_forever(async move {
+                                        state.report(s.api.unblock(id).await.map_err(|e| e.to_string()));
+                                        state.report(state.refresh_friends().await);
+                                    });
+                                }
+                            },
+                            {t("menu.unblock")}
+                        }
+                    }
+                }
+            }
         }
     }
 }

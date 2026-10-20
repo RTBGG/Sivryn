@@ -40,7 +40,11 @@ services:
       - SIVRYN_SCREENSHARE_MAX_FPS=${SIVRYN_SCREENSHARE_MAX_FPS:-60}
       - SIVRYN_SCREENSHARE_MAX_BITRATE=${SIVRYN_SCREENSHARE_MAX_BITRATE:-12000000}
       - SIVRYN_SCREENSHARE_CODECS=${SIVRYN_SCREENSHARE_CODECS:-av1,h264}
+      - SIVRYN_MAX_UPLOAD_MB=${SIVRYN_MAX_UPLOAD_MB:-100}
       - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # Uploaded files (encrypted attachments, server icons).
+      - sivryn-files:/data/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,3 +100,4 @@ services:
 
 volumes:
   sivryn-postgres:
+  sivryn-files:

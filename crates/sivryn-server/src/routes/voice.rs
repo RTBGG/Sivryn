@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use serde::Deserialize;
 use sivryn_protocol::api::{VoiceChannelState, VoiceJoinResponse, VoiceParticipant};
-use sivryn_protocol::model::ChannelKind;
+use sivryn_protocol::gateway::{Audience, Event};
 use sivryn_protocol::permissions::Permissions;
 use sivryn_protocol::{ChannelId, GuildId, UserId};
 
@@ -26,11 +27,15 @@ pub async fn join(
     Path(channel_id): Path<ChannelId>,
 ) -> ApiResult<Json<VoiceJoinResponse>> {
     let channel = db::require_channel(&state.db, channel_id, auth.id, Permissions::CONNECT).await?;
-    if ChannelKind::parse(&channel.kind) != Some(ChannelKind::Voice) {
-        return Err(ApiError::BadRequest("not a voice channel".into()));
+    if !channel.kind().has_calls() {
+        return Err(ApiError::BadRequest("this channel has no calls".into()));
     }
 
-    let perms = db::guild_permissions(&state.db, channel.guild_id.into(), auth.id).await?.ok_or(ApiError::NotFound)?;
+    // DMs and groups allow everything a call needs; guilds use their roles.
+    let perms = match channel.guild() {
+        Some(guild) => db::guild_permissions(&state.db, guild, auth.id).await?.ok_or(ApiError::NotFound)?,
+        None => Permissions::SPEAK | Permissions::VIDEO | Permissions::SCREEN_SHARE,
+    };
     let user = db::user(&state.db, auth.id).await?;
 
     // Guild permissions decide which track sources LiveKit lets this user publish.
@@ -62,6 +67,16 @@ pub async fn join(
         .with_grants(grants)
         .to_jwt()
         .map_err(|e| anyhow::anyhow!("signing LiveKit token: {e}"))?;
+
+    // Ring the other members when a DM or group call starts.
+    if channel.guild().is_none() {
+        let others: Vec<UserId> =
+            db::channel_member_ids(&state.db, channel_id).await?.into_iter().filter(|u| *u != auth.id).collect();
+        let already_in_call = list_participants(&state, channel_id).await.map(|p| !p.is_empty()).unwrap_or(false);
+        if !already_in_call && !others.is_empty() {
+            state.events.publish(Audience::Users(others), Event::CallRing { channel_id, user_id: auth.id });
+        }
+    }
 
     Ok(Json(VoiceJoinResponse {
         channel_id,
@@ -128,17 +143,13 @@ struct TrackInfo {
 
 /// Calls LiveKit's Twirp `RoomService.ListParticipants` with JSON encoding.
 async fn list_participants(state: &AppState, channel: ChannelId) -> anyhow::Result<Vec<VoiceParticipant>> {
-    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
-    let http = HTTP
-        .get_or_init(|| reqwest::Client::builder().timeout(LIVEKIT_API_TIMEOUT).build().expect("HTTP client builds"));
-
     let lk = &state.config.livekit;
     let room = channel.to_string();
     let token = AccessToken::with_api_key(&lk.api_key, &lk.api_secret)
         .with_ttl(Duration::from_secs(60))
         .with_grants(VideoGrants { room_admin: true, room: room.clone(), ..Default::default() })
         .to_jwt()?;
-    let resp = http
+    let resp = http()
         .post(format!("{}/twirp/livekit.RoomService/ListParticipants", lk.api_url))
         .bearer_auth(token)
         .json(&serde_json::json!({ "room": room }))
@@ -164,4 +175,65 @@ async fn list_participants(state: &AppState, channel: ChannelId) -> anyhow::Resu
             })
         })
         .collect())
+}
+
+/// Who is in one channel's call (DMs, groups or a single voice channel).
+pub async fn channel_state(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<ChannelId>,
+) -> ApiResult<Json<VoiceChannelState>> {
+    let channel = db::require_channel(&state.db, channel_id, auth.id, Permissions::VIEW_CHANNEL).await?;
+    if !channel.kind().has_calls() {
+        return Err(ApiError::BadRequest("this channel has no calls".into()));
+    }
+    let participants = list_participants(&state, channel_id).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, %channel_id, "could not list LiveKit participants");
+        Vec::new()
+    });
+    Ok(Json(VoiceChannelState { channel_id, participants }))
+}
+
+/// Disconnects someone from a guild voice channel (`MOVE_MEMBERS`).
+pub async fn disconnect(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, user_id)): Path<(ChannelId, UserId)>,
+) -> ApiResult<StatusCode> {
+    let channel = db::channel(&state.db, channel_id).await?;
+    let guild = channel.guild().ok_or(ApiError::Forbidden)?;
+    db::require(&state.db, guild, auth.id, Permissions::MOVE_MEMBERS).await?;
+    remove_participant(&state, channel_id, user_id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes a user from a LiveKit room (best effort; absent users are fine).
+pub async fn remove_participant(state: &AppState, channel: ChannelId, user: UserId) {
+    let result: anyhow::Result<()> = async {
+        let lk = &state.config.livekit;
+        let room = channel.to_string();
+        let token = AccessToken::with_api_key(&lk.api_key, &lk.api_secret)
+            .with_ttl(Duration::from_secs(60))
+            .with_grants(VideoGrants { room_admin: true, room: room.clone(), ..Default::default() })
+            .to_jwt()?;
+        let resp = http()
+            .post(format!("{}/twirp/livekit.RoomService/RemoveParticipant", lk.api_url))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "room": room, "identity": user.to_string() }))
+            .send()
+            .await?;
+        if resp.status() != reqwest::StatusCode::NOT_FOUND {
+            resp.error_for_status()?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::debug!(error = %e, %channel, %user, "could not remove LiveKit participant");
+    }
+}
+
+fn http() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| reqwest::Client::builder().timeout(LIVEKIT_API_TIMEOUT).build().expect("HTTP client builds"))
 }

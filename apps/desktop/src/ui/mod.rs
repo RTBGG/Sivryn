@@ -3,44 +3,63 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
 use dioxus_native::prelude::dioxus_core::{Task, provide_root_context, spawn_forever};
 use dioxus_native::prelude::*;
 use sivryn_client_core::connect_gateway;
-use sivryn_client_core::protocol::api::{GuildWithChannels, VoiceJoinResponse, VoiceParticipant};
+use sivryn_client_core::protocol::api::{
+    DmChannel, FriendsResponse, GuildWithChannels, VoiceJoinResponse, VoiceParticipant,
+};
 use sivryn_client_core::protocol::gateway::{Event, ServerMessage};
-use sivryn_client_core::protocol::model::ChannelKind;
-use sivryn_client_core::protocol::{ChannelId, GuildId, UserId};
-use sivryn_media::{AudioEngine, CameraShare, ScreenAudio, ScreenShare, Sound, VideoFeed, VoiceCall};
+use sivryn_client_core::protocol::model::{Channel, ChannelKind, Guild, User};
+use sivryn_client_core::protocol::permissions::Permissions;
+use sivryn_client_core::protocol::{ChannelId, GuildId, MessageId, UserId};
+use sivryn_media::{AudioEngine, CameraShare, RgbaFrame, ScreenAudio, ScreenShare, Sound, VideoFeed, VoiceCall};
+use tokio::sync::watch;
 
-use crate::chat::{self, ChatLine};
+use crate::chat;
+use crate::files::PendingFile;
 use crate::hotkeys::{HotkeyEvent, Hotkeys};
 use crate::i18n::{self, t};
+use crate::messages::{ChatMessage, Record, merge};
 use crate::session::Session;
 use crate::settings::{Settings, Theme};
 
 mod call;
 mod chat_view;
+mod emoji_picker;
+mod guild_settings;
+mod home;
 pub mod icons;
 mod login;
+mod media;
+mod members;
+mod menu;
+mod profile;
 mod settings_view;
 mod shell;
 pub mod widgets;
 
+pub use menu::{ContextMenu, MenuItem};
+
 const STYLE: &str = include_str!("style.css");
 const INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
+const TWEMOJI: &[u8] = include_bytes!("../../assets/fonts/TwemojiMozilla.ttf");
 
-/// `@font-face` for the bundled Inter font, as a data URL (built once).
+/// `@font-face` rules for the bundled fonts, as data URLs (built once).
 fn font_css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
     CSS.get_or_init(|| {
-        let data = base64::engine::general_purpose::STANDARD.encode(INTER);
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         format!(
             "@font-face {{ font-family: 'Inter'; font-weight: 100 900; font-style: normal; \
-             src: url(data:font/ttf;base64,{data}) format('truetype'); }}"
+             src: url(data:font/ttf;base64,{}) format('truetype'); }}\n\
+             @font-face {{ font-family: 'Twemoji'; src: url(data:font/ttf;base64,{}) format('truetype'); }}",
+            b64(INTER),
+            b64(TWEMOJI)
         )
     })
 }
@@ -72,17 +91,31 @@ pub struct CallState {
     pub focus: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Modal {
     CreateGuild,
     JoinGuild,
     Invite,
     PickScreen,
+    GuildSettings(GuildId),
+    /// Pick friends to start a DM or group.
+    NewDm,
+    /// Pick someone to add to a DM or group.
+    AddToDm(ChannelId),
+    ConfirmDelete(ChannelId, MessageId),
+    /// "Kick / ban this member?"
+    ConfirmModeration {
+        guild: GuildId,
+        user: UserId,
+        ban: bool,
+    },
+    Profile(UserId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
     Account,
+    Privacy,
     Voice,
     Video,
     Keybinds,
@@ -105,6 +138,34 @@ pub struct Toast {
     pub error: bool,
 }
 
+/// What the message box of a channel is doing.
+#[derive(Clone, Default, PartialEq)]
+pub struct Composer {
+    pub draft: String,
+    pub reply_to: Option<MessageId>,
+    pub editing: Option<MessageId>,
+    pub files: Vec<PendingFile>,
+    /// Uploading and sending; the box keeps showing the files meanwhile.
+    pub sending: bool,
+}
+
+/// An image shown full size over everything else.
+#[derive(Clone)]
+pub struct ViewerImage {
+    pub frames: watch::Receiver<Option<Arc<RgbaFrame>>>,
+    pub width: u32,
+    pub height: u32,
+    pub name: String,
+    /// Where the image came from (a link), shown while hovering.
+    pub url: Option<String>,
+}
+
+impl PartialEq for ViewerImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.width == other.width && self.height == other.height
+    }
+}
+
 /// Engine and hotkeys live for the whole app run.
 #[derive(Clone)]
 pub struct Services {
@@ -119,37 +180,38 @@ pub struct AppState {
     /// Signing in with a saved token at startup.
     pub restoring: Signal<bool>,
     pub guilds: Signal<Vec<GuildWithChannels>>,
+    pub dms: Signal<Vec<DmChannel>>,
+    pub friends: Signal<FriendsResponse>,
+    pub online: Signal<HashSet<UserId>>,
     pub users: Signal<HashMap<UserId, String>>,
+    /// Members of each guild.
+    pub members: Signal<HashMap<GuildId, Vec<User>>>,
+    /// The home view (friends and DMs) instead of a guild.
+    pub home: Signal<bool>,
     pub guild: Signal<Option<GuildId>>,
     pub channel: Signal<Option<ChannelId>>,
-    pub messages: Signal<HashMap<ChannelId, Vec<ChatLine>>>,
+    pub messages: Signal<HashMap<ChannelId, Vec<ChatMessage>>>,
+    pub composer: Signal<HashMap<ChannelId, Composer>>,
     /// Channels whose MLS group this device is in.
     pub groups_ready: Signal<HashSet<ChannelId>>,
     pub unread: Signal<HashSet<ChannelId>>,
     pub voice: Signal<HashMap<ChannelId, Vec<VoiceParticipant>>>,
     pub call: Signal<Option<CallState>>,
+    /// An incoming DM or group call: channel and caller.
+    pub ringing: Signal<Option<(ChannelId, UserId)>>,
     pub muted: Signal<bool>,
     pub deafened: Signal<bool>,
     pub modal: Signal<Option<Modal>>,
+    pub menu: Signal<Option<ContextMenu>>,
+    pub picker: Signal<Option<emoji_picker::PickerTarget>>,
+    pub viewer: Signal<Option<ViewerImage>>,
+    /// A file is being dragged over the window.
+    pub drag_over: Signal<bool>,
     pub settings_page: Signal<Option<SettingsPage>>,
     pub settings: Signal<Settings>,
     pub connection: Signal<Connection>,
     pub toasts: Signal<Vec<Toast>>,
     pub gateway: Signal<Option<Task>>,
-}
-
-/// Inserts lines into a channel's list, skipping ones already there (the
-/// gateway and catch-up can deliver the same message) and keeping order.
-pub fn merge_lines(list: &mut Vec<ChatLine>, new: impl IntoIterator<Item = ChatLine>) {
-    for line in new {
-        match line.id.and_then(|id| list.iter().position(|l| l.id == Some(id))) {
-            // A second copy can't be decrypted again; keep the readable one.
-            Some(i) if list[i].body.is_none() => list[i] = line,
-            Some(_) => {}
-            None => list.push(line),
-        }
-    }
-    list.sort_by_key(|l| (l.created_at, l.id.map(|id| id.0)));
 }
 
 impl AppState {
@@ -176,26 +238,63 @@ impl AppState {
         });
     }
 
+    pub fn me(&self) -> Option<UserId> {
+        self.session.peek().as_ref().map(|s| s.user.id)
+    }
+
     pub fn username(&self, id: UserId) -> String {
         self.users.read().get(&id).cloned().unwrap_or_else(|| t("common.unknown").into())
     }
 
-    pub fn channel_kind(&self, id: ChannelId) -> Option<ChannelKind> {
-        self.guilds.read().iter().flat_map(|g| &g.channels).find(|c| c.id == id).map(|c| c.kind)
+    /// Any channel this user can see: guild channels and DMs.
+    pub fn find_channel(&self, id: ChannelId) -> Option<Channel> {
+        if let Some(c) = self.guilds.read().iter().flat_map(|g| &g.channels).find(|c| c.id == id) {
+            return Some(c.clone());
+        }
+        self.dms.read().iter().find(|d| d.channel.id == id).map(|d| d.channel.clone())
     }
 
+    pub fn channel_kind(&self, id: ChannelId) -> Option<ChannelKind> {
+        self.find_channel(id).map(|c| c.kind)
+    }
+
+    pub fn dm(&self, id: ChannelId) -> Option<DmChannel> {
+        self.dms.read().iter().find(|d| d.channel.id == id).cloned()
+    }
+
+    /// The name shown for a channel: `#name`, the other person, or the group.
     pub fn channel_name(&self, id: ChannelId) -> String {
-        self.guilds
-            .read()
+        if let Some(dm) = self.dm(id) {
+            return self.dm_title(&dm);
+        }
+        self.find_channel(id).map(|c| c.name).unwrap_or_default()
+    }
+
+    pub fn dm_title(&self, dm: &DmChannel) -> String {
+        if !dm.channel.name.is_empty() {
+            return dm.channel.name.clone();
+        }
+        let me = self.me();
+        let others: Vec<String> = dm
+            .members
             .iter()
-            .flat_map(|g| &g.channels)
-            .find(|c| c.id == id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default()
+            .filter(|u| Some(u.id) != me)
+            .map(|u| u.display_name.clone().unwrap_or_else(|| u.username.clone()))
+            .collect();
+        if others.is_empty() { t("home.just_you").into() } else { others.join(", ") }
     }
 
     pub fn guild_of(&self, id: ChannelId) -> Option<GuildId> {
-        self.guilds.read().iter().flat_map(|g| &g.channels).find(|c| c.id == id).map(|c| c.guild_id)
+        self.find_channel(id).and_then(|c| c.guild_id)
+    }
+
+    pub fn guild(&self, id: GuildId) -> Option<Guild> {
+        self.guilds.read().iter().find(|g| g.guild.id == id).map(|g| g.guild.clone())
+    }
+
+    /// My permissions in a guild (none outside guilds).
+    pub fn permissions(&self, guild: GuildId) -> Permissions {
+        self.guilds.read().iter().find(|g| g.guild.id == guild).map(|g| g.permissions).unwrap_or(Permissions::empty())
     }
 
     /// Changes settings, applies them and saves them to disk.
@@ -204,29 +303,126 @@ impl AppState {
         self.settings.peek().save();
     }
 
+    /// Opens a channel (guild channel or DM) and marks it read.
+    pub fn open_channel(mut self, channel: ChannelId) {
+        match self.guild_of(channel) {
+            Some(guild) => {
+                self.home.set(false);
+                self.guild.set(Some(guild));
+            }
+            None => self.home.set(true),
+        }
+        self.channel.set(Some(channel));
+        self.unread.write().remove(&channel);
+    }
+
+    pub fn open_home(mut self) {
+        self.home.set(true);
+        self.channel.set(None);
+    }
+
+    /// Opens (or creates) the DM with these users and shows it.
+    pub fn message_users(self, users: Vec<UserId>) {
+        let Some(s) = self.session.cloned() else { return };
+        spawn_forever(async move {
+            match s.api.open_dm(users).await {
+                Ok(dm) => {
+                    let id = dm.channel.id;
+                    self.add_dm(dm);
+                    self.open_channel(id);
+                }
+                Err(e) => self.report(Err(e.to_string())),
+            }
+        });
+    }
+
+    fn add_dm(mut self, dm: DmChannel) {
+        for u in &dm.members {
+            self.users.write().insert(u.id, u.display_name.clone().unwrap_or_else(|| u.username.clone()));
+        }
+        let mut dms = self.dms.write();
+        dms.retain(|d| d.channel.id != dm.channel.id);
+        dms.insert(0, dm);
+    }
+
     /// Reloads guilds and member names after membership changes.
     pub async fn refresh(mut self) -> Result<(), String> {
         let Some(s) = self.session.cloned() else { return Ok(()) };
         let guilds = s.api.guilds().await.map_err(|e| e.to_string())?;
-        let mut users = HashMap::from([(s.user.id, s.user.username.clone())]);
+        let mut users = self.users.peek().clone();
+        let mut members = HashMap::new();
+        users.insert(s.user.id, s.user.display_name.clone().unwrap_or_else(|| s.user.username.clone()));
         for g in &guilds {
-            for m in s.api.members(g.guild.id).await.map_err(|e| e.to_string())? {
-                users.insert(m.id, m.display_name.clone().unwrap_or(m.username));
+            let list = s.api.members(g.guild.id).await.map_err(|e| e.to_string())?;
+            for m in &list {
+                users.insert(m.id, m.display_name.clone().unwrap_or_else(|| m.username.clone()));
             }
+            members.insert(g.guild.id, list);
         }
+        self.members.set(members);
         let current = *self.guild.peek();
         if current.is_none_or(|id| !guilds.iter().any(|g| g.guild.id == id)) {
             let remembered = self.settings.peek().last_guild.filter(|id| guilds.iter().any(|g| g.guild.id == *id));
-            self.guild.set(remembered.or_else(|| guilds.first().map(|g| g.guild.id)));
+            let guild = remembered.or_else(|| guilds.first().map(|g| g.guild.id));
+            self.guild.set(guild);
+            // Open its first text channel, so a restart lands in a chat.
+            if !*self.home.peek() && self.channel.peek().is_none() {
+                let first = guilds
+                    .iter()
+                    .find(|g| Some(g.guild.id) == guild)
+                    .and_then(|g| g.channels.iter().find(|c| c.kind == ChannelKind::Text))
+                    .map(|c| c.id);
+                self.channel.set(first);
+            }
+            if remembered.is_none() && guilds.is_empty() {
+                self.home.set(true);
+            }
         }
         self.guilds.set(guilds);
         self.users.set(users);
         Ok(())
     }
 
+    pub async fn refresh_dms(mut self) -> Result<(), String> {
+        let Some(s) = self.session.cloned() else { return Ok(()) };
+        let dms = s.api.dms().await.map_err(|e| e.to_string())?;
+        let mut users = self.users.write();
+        for u in dms.iter().flat_map(|d| &d.members) {
+            users.insert(u.id, u.display_name.clone().unwrap_or_else(|| u.username.clone()));
+        }
+        drop(users);
+        self.dms.set(dms);
+        Ok(())
+    }
+
+    pub async fn refresh_friends(mut self) -> Result<(), String> {
+        let Some(s) = self.session.cloned() else { return Ok(()) };
+        let friends = s.api.friends().await.map_err(|e| e.to_string())?;
+        let mut users = self.users.write();
+        for u in friends.friends.iter().chain(&friends.incoming).chain(&friends.outgoing).chain(&friends.blocked) {
+            users.insert(u.id, u.display_name.clone().unwrap_or_else(|| u.username.clone()));
+        }
+        drop(users);
+        self.friends.set(friends);
+        Ok(())
+    }
+
+    async fn refresh_presence(mut self) {
+        let Some(s) = self.session.cloned() else { return };
+        if let Ok(online) = s.api.presence().await {
+            let mut online: HashSet<UserId> = online.into_iter().collect();
+            // You are online whenever you see this.
+            online.insert(s.user.id);
+            self.online.set(online);
+        }
+    }
+
     /// Who is in the selected guild's voice channels.
     pub async fn refresh_voice(mut self) {
         let (Some(s), Some(guild)) = (self.session.cloned(), *self.guild.peek()) else { return };
+        if *self.home.peek() {
+            return;
+        }
         match s.api.voice_states(guild).await {
             Ok(states) => {
                 let map = states.into_iter().map(|v| (v.channel_id, v.participants)).collect();
@@ -238,9 +434,12 @@ impl AppState {
         }
     }
 
-    /// Catches up every channel this device has a group for.
+    /// Loads everything and catches up every channel this device has a group for.
     async fn sync(mut self, s: &Session) -> Result<(), String> {
         self.refresh().await?;
+        self.refresh_dms().await?;
+        self.refresh_friends().await?;
+        self.refresh_presence().await;
         for channel in chat::accept_welcomes(s).await? {
             self.groups_ready.write().insert(channel);
         }
@@ -248,18 +447,20 @@ impl AppState {
         for channel in channels {
             self.groups_ready.write().insert(channel);
             let new = chat::catch_up(s, channel).await?;
-            self.on_new_lines(s, channel, new);
+            self.on_new_records(s, channel, new);
         }
         Ok(())
     }
 
-    fn on_new_lines(mut self, s: &Session, channel: ChannelId, lines: Vec<ChatLine>) {
-        if lines.is_empty() {
+    fn on_new_records(mut self, s: &Session, channel: ChannelId, records: Vec<Record>) {
+        if records.is_empty() {
             return;
         }
-        let from_others = lines.iter().any(|l| l.author != s.user.id);
+        let from_others = records
+            .iter()
+            .any(|r| r.author != s.user.id && r.kind == sivryn_client_core::protocol::model::MessageKind::Message);
         if let Some(list) = self.messages.write().get_mut(&channel) {
-            merge_lines(list, lines);
+            merge(list, records);
         }
         if from_others && *self.channel.peek() != Some(channel) {
             self.unread.write().insert(channel);
@@ -300,19 +501,43 @@ impl AppState {
         }
     }
 
+    /// Text channels of a guild this device has a group for.
+    fn guild_group_channels(&self, s: &Session, guild: GuildId) -> Vec<ChannelId> {
+        self.guilds
+            .read()
+            .iter()
+            .filter(|g| g.guild.id == guild)
+            .flat_map(|g| g.channels.iter().map(|c| c.id))
+            .filter(|c| s.mls.borrow().has_group(*c))
+            .collect()
+    }
+
     async fn handle_event(mut self, s: &Session, event: Event) {
         match event {
-            Event::MessageCreate { message, .. } => {
+            Event::MessageCreate { message } => {
                 let channel = message.channel_id;
                 if !s.mls.borrow().has_group(channel) {
                     return;
                 }
-                let lines = chat::receive(s, channel, std::slice::from_ref(&message));
-                let from_other = message.author_id != s.user.id;
+                let records = chat::receive(s, channel, std::slice::from_ref(&message));
+                let from_other = message.author_id != s.user.id
+                    && message.kind == sivryn_client_core::protocol::model::MessageKind::Message;
                 let viewing = *self.channel.peek() == Some(channel);
-                self.on_new_lines(s, channel, lines);
+                self.on_new_records(s, channel, records);
                 if from_other && !viewing && self.settings.peek().notifications.message_sound {
                     use_services_engine().play(Sound::Message);
+                }
+                // Busy DMs move to the top of the list.
+                let is_dm = self.dms.peek().iter().position(|d| d.channel.id == channel);
+                if let Some(i) = is_dm.filter(|i| *i > 0) {
+                    let dm = self.dms.write().remove(i);
+                    self.dms.write().insert(0, dm);
+                }
+            }
+            Event::MessageDelete { channel_id, message_id } => {
+                let _ = s.store.delete(message_id);
+                if let Some(list) = self.messages.write().get_mut(&channel_id) {
+                    list.retain(|m| m.id != message_id);
                 }
             }
             Event::MlsCommit { channel_id, commit, .. } => {
@@ -325,7 +550,7 @@ impl AppState {
                     for channel in joined {
                         self.groups_ready.write().insert(channel);
                         match chat::catch_up(s, channel).await {
-                            Ok(new) => self.on_new_lines(s, channel, new),
+                            Ok(new) => self.on_new_records(s, channel, new),
                             Err(e) => self.report(Err(e)),
                         }
                     }
@@ -333,30 +558,68 @@ impl AppState {
                 Err(e) => self.report(Err(e)),
             },
             Event::MemberJoin { guild_id, user } => {
+                self.report(self.refresh().await);
                 if user.id != s.user.id {
-                    let channels: Vec<ChannelId> = self
-                        .guilds
-                        .read()
-                        .iter()
-                        .filter(|g| g.guild.id == guild_id)
-                        .flat_map(|g| g.channels.iter().map(|c| c.id))
-                        .collect();
-                    for channel in channels {
+                    for channel in self.guild_group_channels(s, guild_id) {
                         self.report(chat::add_user(s, channel, user.id).await);
                     }
+                }
+            }
+            Event::MemberLeave { guild_id, user_id } => {
+                if user_id != s.user.id {
+                    for channel in self.guild_group_channels(s, guild_id) {
+                        self.report(chat::remove_users(s, channel, &[user_id]).await);
+                    }
+                } else if *self.guild.peek() == Some(guild_id) {
+                    self.guild.set(None);
+                    self.channel.set(None);
                 }
                 self.report(self.refresh().await);
             }
             Event::GuildCreate { .. }
+            | Event::GuildUpdate { .. }
             | Event::GuildDelete { .. }
             | Event::ChannelCreate { .. }
-            | Event::ChannelDelete { .. }
-            | Event::MemberLeave { .. } => self.report(self.refresh().await),
-            _ => {}
+            | Event::ChannelDelete { .. } => self.report(self.refresh().await),
+            Event::DmUpdate { channel_id, added, removed } => {
+                self.report(self.refresh_dms().await);
+                if removed.contains(&s.user.id) {
+                    s.mls.borrow_mut().remove_group(channel_id);
+                    s.persist_mls();
+                    return;
+                }
+                let others: Vec<UserId> = added.into_iter().filter(|u| *u != s.user.id).collect();
+                for user in others {
+                    self.report(chat::add_user(s, channel_id, user).await);
+                }
+                if !removed.is_empty() {
+                    self.report(chat::remove_users(s, channel_id, &removed).await);
+                }
+            }
+            Event::CallRing { channel_id, user_id } => {
+                let in_this_call = self.call.peek().as_ref().is_some_and(|c| c.channel == channel_id);
+                if !in_this_call && user_id != s.user.id {
+                    self.report(self.refresh_dms().await);
+                    self.ringing.set(Some((channel_id, user_id)));
+                    call::ring(self);
+                }
+            }
+            Event::RelationshipsChanged => {
+                self.report(self.refresh_friends().await);
+                // New friends share presence from now on.
+                self.refresh_presence().await;
+            }
+            Event::PresenceUpdate { user_id, online } => {
+                if online {
+                    self.online.write().insert(user_id);
+                } else {
+                    self.online.write().remove(&user_id);
+                }
+            }
         }
     }
 
-    /// A new MLS epoch means a new media key for E2EE voice channels.
+    /// A new MLS epoch means a new media key for E2EE calls.
     fn on_epoch_change(&self, s: &Session, channel: ChannelId, epoch: u64) {
         let call = self.call.read();
         let Some(call) = call.as_ref().filter(|c| c.channel == channel && c.join.e2ee) else { return };
@@ -399,14 +662,23 @@ impl AppState {
         }
         self.update_settings(|s| s.auto_login = None);
         self.guilds.set(Vec::new());
+        self.dms.set(Vec::new());
+        self.friends.set(FriendsResponse::default());
+        self.online.set(HashSet::new());
         self.users.set(HashMap::new());
+        self.members.set(HashMap::new());
         self.guild.set(None);
         self.channel.set(None);
         self.messages.set(HashMap::new());
+        self.composer.set(HashMap::new());
         self.groups_ready.set(HashSet::new());
         self.unread.set(HashSet::new());
         self.voice.set(HashMap::new());
         self.modal.set(None);
+        self.menu.set(None);
+        self.picker.set(None);
+        self.viewer.set(None);
+        self.ringing.set(None);
         self.settings_page.set(None);
         self.connection.set(Connection::Offline);
     }
@@ -437,6 +709,16 @@ impl AppState {
         {
             vc.set_muted(silenced);
         }
+    }
+
+    /// Volumes per participant, with locally muted users at 0.
+    pub fn effective_volumes(&self) -> HashMap<String, f32> {
+        let s = self.settings.read();
+        let mut volumes = s.volumes.clone();
+        for key in &s.muted_users {
+            volumes.insert(key.clone(), 0.0);
+        }
+        volumes
     }
 }
 
@@ -502,17 +784,28 @@ pub fn App() -> Element {
             session: root(None),
             restoring: root(settings.auto_login.is_some()),
             guilds: root(Vec::new()),
+            dms: root(Vec::new()),
+            friends: root(FriendsResponse::default()),
+            online: root(HashSet::new()),
             users: root(HashMap::new()),
+            members: root(HashMap::new()),
+            home: root(false),
             guild: root(None),
             channel: root(None),
             messages: root(HashMap::new()),
+            composer: root(HashMap::new()),
             groups_ready: root(HashSet::new()),
             unread: root(HashSet::new()),
             voice: root(HashMap::new()),
             call: root(None),
+            ringing: root(None),
             muted: root(false),
             deafened: root(false),
             modal: root(None),
+            menu: root(None),
+            picker: root(None),
+            viewer: root(None),
+            drag_over: root(false),
             settings_page: root(None),
             settings: root(settings),
             connection: root(Connection::Offline),
@@ -525,7 +818,7 @@ pub fn App() -> Element {
     let services = use_hook(|| {
         let settings = state.settings.peek().clone();
         let engine = AudioEngine::new(settings.audio.clone());
-        engine.set_volumes(settings.volumes.clone());
+        engine.set_volumes(state.effective_volumes());
         ENGINE.with(|e| *e.borrow_mut() = Some(engine.clone()));
         let (hotkeys, mut events) = Hotkeys::start(settings.keybinds.clone(), engine.clone());
 
@@ -543,6 +836,17 @@ pub fn App() -> Element {
         });
         provide_root_context(CapturedKey(captured));
 
+        // Files dragged onto the window go to the open channel's message box.
+        let (drop_tx, mut drops) = tokio::sync::mpsc::unbounded_channel();
+        blitz_shell::file_drop::set_handler(move |event| {
+            let _ = drop_tx.send(event);
+        });
+        spawn_forever(async move {
+            while let Some(event) = drops.recv().await {
+                chat_view::handle_file_drop(state, event);
+            }
+        });
+
         // Voice presence refresh.
         spawn_forever(async move {
             loop {
@@ -550,6 +854,8 @@ pub fn App() -> Element {
                 tokio::time::sleep(Duration::from_secs(8)).await;
             }
         });
+        // Moves idle members to the guild's AFK channel.
+        spawn_forever(call::afk_watch(state));
 
         // Sign in with the saved token.
         if let Some(account) = settings.auto_login.clone() {
@@ -571,8 +877,9 @@ pub fn App() -> Element {
     use_effect(move || {
         let s = state.settings.read();
         services.engine.set_config(s.audio.clone());
-        services.engine.set_volumes(s.volumes.clone());
         services.hotkeys.set_binds(s.keybinds.clone());
+        drop(s);
+        services.engine.set_volumes(state.effective_volumes());
     });
 
     let settings = state.settings.read();
@@ -583,6 +890,13 @@ pub fn App() -> Element {
     let compact = if settings.appearance.compact { "compact" } else { "" };
     drop(settings);
     let dynamic_css = format!(":root {{ font-size: {font_size}px; }}");
+
+    // Title bar follows the theme.
+    let mut styled_theme = use_signal(|| None::<&'static str>);
+    if *styled_theme.peek() != Some(theme) {
+        styled_theme.set(Some(theme));
+        spawn_forever(crate::window::style_title_bar(theme == "dark"));
+    }
 
     rsx! {
         // Keyed by theme and language: Blitz bakes icon colors and text at build
@@ -601,9 +915,42 @@ pub fn App() -> Element {
             } else {
                 login::Login {}
             }
+            // Overlays come last so they paint on top of everything.
+            if state.viewer.read().is_some() {
+                media::ImageViewer {}
+            }
+            if state.ringing.read().is_some() {
+                call::IncomingCall {}
+            }
+            if state.picker.read().is_some() {
+                emoji_picker::EmojiPicker {}
+            }
+            if state.menu.read().is_some() {
+                menu::ContextMenuView {}
+            }
             Toasts {}
+            CaretBlink {}
         }
     }
+}
+
+/// Blitz repaints only when the DOM changes, so this toggles a hidden
+/// attribute at every caret blink while a text field has focus.
+#[component]
+fn CaretBlink() -> Element {
+    let mut tick = use_signal(|| false);
+    use_future(move || async move {
+        loop {
+            if blitz_dom::caret::input_focused() {
+                let wait = blitz_dom::caret::ms_until_toggle() + 5;
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                tick.toggle();
+            } else {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        }
+    });
+    rsx! { div { class: "caret-tick", "data-on": "{tick}" } }
 }
 
 /// A key captured for a binding on the settings page (`Some(None)` = Escape).

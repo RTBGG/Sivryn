@@ -14,6 +14,8 @@ pub enum Sound {
     Undeafen,
     Message,
     ShareStart,
+    /// Incoming call; the app repeats it until answered.
+    Ring,
 }
 
 /// A sequence of notes (frequency in Hz, duration in ms), soft sine with a
@@ -52,6 +54,7 @@ pub fn samples(sound: Sound) -> Arc<[f32]> {
             (Sound::Undeafen, chime(&[(261.6, 80), (329.6, 80), (440.0, 140)], 0.18)),
             (Sound::Message, chime(&[(1318.5, 160)], 0.12)),
             (Sound::ShareStart, chime(&[(523.3, 70), (659.3, 70), (784.0, 180)], 0.18)),
+            (Sound::Ring, chime(&[(784.0, 120), (987.8, 120), (784.0, 120), (987.8, 260)], 0.2)),
         ]
     });
     cache.iter().find(|(s, _)| *s == sound).map(|(_, samples)| samples.clone()).expect("every sound is synthesized")
@@ -72,6 +75,7 @@ mod tests {
             Sound::Undeafen,
             Sound::Message,
             Sound::ShareStart,
+            Sound::Ring,
         ] {
             let s = samples(sound);
             assert!(s.len() < RATE as usize, "{sound:?} shorter than a second");

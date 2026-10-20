@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::MlsWelcome;
-use crate::model::{Channel, Guild, Message, User, VoiceParticipant};
-use crate::{ChannelId, DeviceId, GuildId, UserId};
+use crate::model::{Channel, Guild, Message, User};
+use crate::{ChannelId, DeviceId, GuildId, MessageId, UserId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", content = "d", rename_all = "snake_case")]
@@ -28,11 +28,15 @@ pub enum ServerMessage {
     InvalidSession { reason: String },
 }
 
-/// Events fanned out through the event bus.
+/// Events pushed to clients. The server decides who receives each one (see
+/// [`Audience`]); events carry what clients need to update their state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Event {
     GuildCreate {
+        guild: Guild,
+    },
+    GuildUpdate {
         guild: Guild,
     },
     GuildDelete {
@@ -42,24 +46,27 @@ pub enum Event {
         channel: Channel,
     },
     ChannelDelete {
-        guild_id: GuildId,
+        guild_id: Option<GuildId>,
         channel_id: ChannelId,
     },
     MemberJoin {
         guild_id: GuildId,
         user: User,
     },
+    /// Left, kicked or banned.
     MemberLeave {
         guild_id: GuildId,
         user_id: UserId,
     },
     MessageCreate {
-        guild_id: GuildId,
         message: Message,
+    },
+    MessageDelete {
+        channel_id: ChannelId,
+        message_id: MessageId,
     },
     /// An MLS commit that every device in the channel's group must apply.
     MlsCommit {
-        guild_id: GuildId,
         channel_id: ChannelId,
         epoch: u64,
         commit: String,
@@ -69,39 +76,45 @@ pub enum Event {
         channel_id: ChannelId,
         welcome: MlsWelcome,
     },
-    VoiceStateUpdate {
-        guild_id: GuildId,
-        state: VoiceParticipant,
+    /// A DM or group was created, renamed or changed members. Members that
+    /// are already in the channel's MLS group add `added` and remove `removed`.
+    DmUpdate {
+        channel_id: ChannelId,
+        #[serde(default)]
+        added: Vec<UserId>,
+        #[serde(default)]
+        removed: Vec<UserId>,
     },
-    VoiceLeave {
-        guild_id: GuildId,
+    /// Someone started a call in a DM or group you're in.
+    CallRing {
         channel_id: ChannelId,
         user_id: UserId,
     },
+    /// Friends, requests or blocks changed; refetch `GET /friends`.
+    RelationshipsChanged,
     PresenceUpdate {
         user_id: UserId,
         online: bool,
     },
 }
 
-impl Event {
-    /// The guild an event belongs to, used to route it to subscribers.
-    /// `None` means the event is addressed by other means (e.g. device IDs).
-    pub fn guild_id(&self) -> Option<GuildId> {
-        match self {
-            Event::GuildCreate { guild } => Some(guild.id),
-            Event::ChannelCreate { channel } => Some(channel.guild_id),
-            Event::GuildDelete { guild_id }
-            | Event::ChannelDelete { guild_id, .. }
-            | Event::MemberJoin { guild_id, .. }
-            | Event::MemberLeave { guild_id, .. }
-            | Event::MessageCreate { guild_id, .. }
-            | Event::MlsCommit { guild_id, .. }
-            | Event::VoiceStateUpdate { guild_id, .. }
-            | Event::VoiceLeave { guild_id, .. } => Some(*guild_id),
-            Event::MlsWelcome { .. } | Event::PresenceUpdate { .. } => None,
-        }
-    }
+/// Who receives an event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "to", content = "ids", rename_all = "snake_case")]
+pub enum Audience {
+    /// Every member of the guild.
+    Guild(GuildId),
+    /// These users, on all their connections.
+    Users(Vec<UserId>),
+    /// These devices only (MLS welcomes).
+    Devices(Vec<DeviceId>),
+}
+
+/// An event with its audience, as it travels through the server's event bus.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Envelope {
+    pub to: Audience,
+    pub event: Event,
 }
 
 #[cfg(test)]

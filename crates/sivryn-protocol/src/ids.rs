@@ -71,4 +71,6 @@ id_type!(
     InviteId,
     /// A device of a user; each device has its own MLS identity.
     DeviceId,
+    /// An uploaded file: an (encrypted) attachment or a guild icon.
+    FileId,
 );
