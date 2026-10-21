@@ -34,6 +34,8 @@ use dsp::{FRAME, RATE};
 pub use sounds::Sound;
 
 /// Remote audio is kept at most this far behind (samples, stereo).
+/// Volume keys of local streams (video players) start with this.
+pub const LOCAL_PREFIX: &str = "player:";
 const MAX_REMOTE_BUFFER: usize = (RATE as usize / 1000) * 150 * 2;
 /// …and trimmed back to this when it falls further behind.
 const TRIMMED_REMOTE_BUFFER: usize = (RATE as usize / 1000) * 40 * 2;
@@ -188,8 +190,11 @@ impl AudioEngine {
         lock(&self.inner.volumes).insert(key.to_owned(), volume.clamp(0.0, 2.0));
     }
 
+    /// Replaces the participant volumes; players keep theirs.
     pub fn set_volumes(&self, volumes: HashMap<String, f32>) {
-        *lock(&self.inner.volumes) = volumes;
+        let mut current = lock(&self.inner.volumes);
+        current.retain(|k, _| k.starts_with(LOCAL_PREFIX));
+        current.extend(volumes);
     }
 
     /// Processed microphone level in dBFS, for meters.
@@ -596,10 +601,11 @@ fn run_playout(inner: &Arc<Inner>) {
     let mut mix = [0.0f32; FRAME * 2];
 
     loop {
-        // Linger briefly so the end of a sound isn't cut off.
+        // Stay open a while after the last sound: opening and closing the
+        // device for every short sound made some drivers click.
         if inner.playout_wanted() {
             idle_since = None;
-        } else if idle_since.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(500) {
+        } else if idle_since.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(20) {
             break;
         }
 
@@ -616,7 +622,12 @@ fn run_playout(inner: &Arc<Inner>) {
         }
         if output.is_none() && Instant::now() >= retry_at {
             match open_output(config.output_device.as_deref()) {
-                Ok(stream) => {
+                Ok(mut stream) => {
+                    // A little silence first, so the device settles before a sound starts.
+                    let silence = [0.0f32; FRAME * 2];
+                    for _ in 0..3 {
+                        stream.samples.push_slice(&silence);
+                    }
                     output = Some(stream);
                     output_device = Some(config.output_device.clone());
                 }
@@ -655,7 +666,10 @@ fn mix_frame(inner: &Inner, config: &AudioConfig, mix: &mut [f32; FRAME * 2]) {
                 }
                 remote.primed = true;
             }
-            if buf.len() > MAX_REMOTE_BUFFER {
+            // Live audio drops a backlog to keep latency low. Local streams
+            // (videos) are paced by their player and arrive in big blocks,
+            // which this would cut to pieces.
+            if remote.task.is_some() && buf.len() > MAX_REMOTE_BUFFER {
                 let excess = (buf.len() - TRIMMED_REMOTE_BUFFER) & !1;
                 buf.drain(..excess);
             }
@@ -706,4 +720,30 @@ fn mix_frame(inner: &Inner, config: &AudioConfig, mix: &mut [f32; FRAME * 2]) {
     }
     let input = reference;
     let _ = lock(&inner.echo).process_render_f32(&[&input], &mut [&mut reference[..]]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_streams_are_mixed() {
+        let engine = AudioEngine::new(AudioConfig::default());
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        lock(&engine.inner.remotes).push(Remote {
+            track_sid: "player:test".into(),
+            volume_key: "player:test".into(),
+            buffer: buffer.clone(),
+            primed: false,
+            task: None,
+        });
+        // Far more than the live backlog limit: local streams keep it all.
+        lock(&buffer).extend(std::iter::repeat_n(0.25f32, MAX_REMOTE_BUFFER * 3));
+        let config = AudioConfig::default();
+        let mut mix = [0.0f32; FRAME * 2];
+        mix_frame(&engine.inner, &config, &mut mix);
+        let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.1, "peak {peak}");
+        assert_eq!(lock(&buffer).len(), MAX_REMOTE_BUFFER * 3 - FRAME * 2);
+    }
 }

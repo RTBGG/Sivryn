@@ -3,8 +3,10 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sivryn_protocol::api::*;
-use sivryn_protocol::model::{Category, Channel, Guild, Message, NotifyLevel, User};
-use sivryn_protocol::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
+use sivryn_protocol::model::{
+    Category, Channel, Guild, Message, NotifyLevel, OverwriteTarget, PermissionOverwrite, Role, User,
+};
+use sivryn_protocol::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, RoleId, UserId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -22,6 +24,15 @@ impl ClientError {
     /// The thing asked for doesn't exist (any more).
     pub fn is_not_found(&self) -> bool {
         matches!(self, ClientError::Api { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
+
+    /// A network hiccup worth retrying (connection broke, nothing arrived).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ClientError::Network(e) => !e.is_builder() && !e.is_redirect(),
+            ClientError::Api { status, .. } => *status == StatusCode::GATEWAY_TIMEOUT,
+            _ => false,
+        }
     }
 
     /// The session token was rejected (expired or logged out elsewhere).
@@ -376,12 +387,92 @@ impl ApiClient {
     }
 
     pub async fn download_file(&self, file: FileId) -> Result<Vec<u8>, ClientError> {
-        let resp = self.authed(Method::GET, &format!("/files/{file}"))?.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(ClientError::Api { status, code: "download".into(), message: "file unavailable".into() });
+        self.download_file_with_progress(file, |_, _| {}).await
+    }
+
+    /// Downloads a file, reporting the bytes received so far and the total
+    /// (when known). A download that receives nothing for a while, or whose
+    /// connection breaks, resumes where it stopped (`Range`); a server that
+    /// doesn't support that sends it from the start again.
+    pub async fn download_file_with_progress(
+        &self,
+        file: FileId,
+        mut progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<Vec<u8>, ClientError> {
+        /// Failed attempts in a row (without new data) before giving up.
+        const ATTEMPTS: u32 = 5;
+        let started = std::time::Instant::now();
+        let mut data = Vec::new();
+        let mut total = None;
+        let mut failures = 0;
+        loop {
+            let before = data.len();
+            match self.download_part(file, &mut data, &mut total, &mut progress).await {
+                Ok(()) => break,
+                Err(e) if e.is_transient() && failures + 1 < ATTEMPTS => {
+                    failures = if data.len() > before { 0 } else { failures + 1 };
+                    tracing::warn!(%file, received = data.len(), error = %e, "download interrupted, resuming");
+                }
+                Err(e) => return Err(e),
+            }
         }
-        Ok(resp.bytes().await?.to_vec())
+        tracing::debug!(%file, bytes = data.len(), elapsed = ?started.elapsed(), "download finished");
+        Ok(data)
+    }
+
+    /// One request of a download: the rest of the file after `data`.
+    async fn download_part(
+        &self,
+        file: FileId,
+        data: &mut Vec<u8>,
+        total: &mut Option<u64>,
+        progress: &mut impl FnMut(u64, Option<u64>),
+    ) -> Result<(), ClientError> {
+        let stalled = || ClientError::Api {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "download".into(),
+            message: "download stalled".into(),
+        };
+        let mut req = self.authed(Method::GET, &format!("/files/{file}"))?;
+        if !data.is_empty() {
+            req = req.header(reqwest::header::RANGE, format!("bytes={}-", data.len()));
+        }
+        let mut resp =
+            tokio::time::timeout(std::time::Duration::from_secs(20), req.send()).await.map_err(|_| stalled())??;
+        let status = resp.status();
+        // A server that can resume gets a short wait before resuming; one that
+        // can't (it would start over) gets a long one.
+        let resumable = resp.headers().get(reqwest::header::ACCEPT_RANGES).is_some_and(|v| v.as_bytes() == b"bytes");
+        let patience = std::time::Duration::from_secs(if resumable { 20 } else { 120 });
+        match status {
+            StatusCode::PARTIAL_CONTENT => {
+                // "bytes start-end/total": it must continue exactly where we are.
+                let range = resp.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok());
+                let parsed = range.and_then(|r| {
+                    let (span, size) = r.strip_prefix("bytes ")?.split_once('/')?;
+                    Some((span.split_once('-')?.0.parse::<usize>().ok()?, size.parse::<u64>().ok()))
+                });
+                match parsed {
+                    Some((start, size)) if start == data.len() => *total = size.or(*total),
+                    _ => data.clear(),
+                }
+            }
+            s if s.is_success() => {
+                // The whole file (first request, or the server ignored the range).
+                data.clear();
+                *total = resp.content_length();
+            }
+            _ => return Err(ClientError::Api { status, code: "download".into(), message: "file unavailable".into() }),
+        }
+        tracing::debug!(%file, %status, offset = data.len(), total = ?*total, "download started");
+        while let Some(chunk) = tokio::time::timeout(patience, resp.chunk()).await.map_err(|_| stalled())?? {
+            data.extend_from_slice(&chunk);
+            progress(data.len() as u64, *total);
+        }
+        if total.is_some_and(|t| (data.len() as u64) < t) {
+            return Err(stalled());
+        }
+        Ok(())
     }
 
     pub async fn channel_voice_state(&self, channel: ChannelId) -> Result<VoiceChannelState, ClientError> {
@@ -461,8 +552,136 @@ impl ApiClient {
         self.delete(if banner { "/users/@me/banner" } else { "/users/@me/avatar" }).await
     }
 
+    // --- Roles and permissions ---------------------------------------------------
+
+    pub async fn create_role(&self, guild: GuildId, req: &RoleRequest) -> Result<Role, ClientError> {
+        self.post(&format!("/guilds/{guild}/roles"), req).await
+    }
+
+    pub async fn update_role(&self, role: RoleId, req: &RoleRequest) -> Result<Role, ClientError> {
+        self.patch(&format!("/roles/{role}"), req).await
+    }
+
+    pub async fn delete_role(&self, role: RoleId) -> Result<(), ClientError> {
+        self.delete(&format!("/roles/{role}")).await
+    }
+
+    /// Orders the roles from highest to lowest (without `@everyone`).
+    pub async fn reorder_roles(&self, guild: GuildId, roles: Vec<RoleId>) -> Result<(), ClientError> {
+        self.put(&format!("/guilds/{guild}/roles/order"), &RoleOrderRequest { roles }).await
+    }
+
+    /// Gives (`add`) or takes a role.
+    pub async fn set_member_role(
+        &self,
+        guild: GuildId,
+        user: UserId,
+        role: RoleId,
+        add: bool,
+    ) -> Result<(), ClientError> {
+        let path = format!("/guilds/{guild}/members/{user}/roles/{role}");
+        if add { self.put(&path, &()).await } else { self.delete(&path).await }
+    }
+
+    /// Sets (or with empty allow and deny: removes) an overwrite on a channel
+    /// (`category: None`) or a category.
+    pub async fn set_overwrite(
+        &self,
+        channel: Option<ChannelId>,
+        category: Option<CategoryId>,
+        overwrite: &PermissionOverwrite,
+    ) -> Result<(), ClientError> {
+        let base = match (channel, category) {
+            (Some(c), _) => format!("/channels/{c}/overwrites"),
+            (None, Some(c)) => format!("/categories/{c}/overwrites"),
+            (None, None) => return Ok(()),
+        };
+        if overwrite.allow.is_empty() && overwrite.deny.is_empty() {
+            let target = match overwrite.target {
+                OverwriteTarget::Role(r) => format!("role/{r}"),
+                OverwriteTarget::Member(u) => format!("member/{u}"),
+            };
+            self.delete(&format!("{base}/{target}")).await
+        } else {
+            self.put(&base, overwrite).await
+        }
+    }
+
+    /// Saves the whole channel list order after a drag.
+    pub async fn set_layout(&self, guild: GuildId, req: &LayoutRequest) -> Result<(), ClientError> {
+        self.put(&format!("/guilds/{guild}/layout"), req).await
+    }
+
+    /// Moves someone into another voice channel (needs `MOVE_MEMBERS`).
+    pub async fn move_voice_member(&self, guild: GuildId, user: UserId, channel: ChannelId) -> Result<(), ClientError> {
+        self.post(&format!("/guilds/{guild}/voice/move"), &MoveMemberRequest { user_id: user, channel_id: channel })
+            .await
+    }
+
     /// Disconnects someone from a guild voice channel (needs `MOVE_MEMBERS`).
     pub async fn disconnect_voice(&self, channel: ChannelId, user: UserId) -> Result<(), ClientError> {
         self.delete(&format!("/channels/{channel}/voice/{user}")).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A server that sends at most `cut` bytes per response and then drops
+    /// the connection; `ranges` says whether it honours `Range`.
+    async fn flaky_server(file: Vec<u8>, cut: usize, ranges: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut req = vec![0u8; 4096];
+                let n = sock.read(&mut req).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&req[..n]).to_lowercase();
+                let start = req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("range: bytes="))
+                    .and_then(|r| r.trim().trim_end_matches('-').parse::<usize>().ok())
+                    .filter(|_| ranges)
+                    .unwrap_or(0);
+                let rest = &file[start..];
+                let head = if start > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        rest.len(),
+                        file.len() - 1,
+                        file.len()
+                    )
+                } else {
+                    let accept = if ranges { "Accept-Ranges: bytes\r\n" } else { "" };
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{accept}\r\n", rest.len())
+                };
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&rest[..rest.len().min(cut)]).await;
+                // Dropping the socket cuts the response short.
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn broken_downloads_resume_where_they_stopped() {
+        let file: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let base = flaky_server(file.clone(), 100_000, true).await;
+        let api = ApiClient::new(&base).unwrap().with_token("t".into());
+        let mut reports = 0;
+        let got = api.download_file_with_progress(FileId::new(), |_, _| reports += 1).await.unwrap();
+        assert_eq!(got, file);
+        assert!(reports > 0);
+    }
+
+    #[tokio::test]
+    async fn without_range_support_it_gives_up_instead_of_looping() {
+        let file = vec![7u8; 50_000];
+        let base = flaky_server(file, 10_000, false).await;
+        let api = ApiClient::new(&base).unwrap().with_token("t".into());
+        assert!(api.download_file(FileId::new()).await.is_err());
     }
 }

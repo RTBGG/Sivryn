@@ -7,7 +7,7 @@ use dioxus_native::prelude::*;
 use sivryn_client_core::protocol::api::UpdateMeRequest;
 use sivryn_client_core::protocol::model::{Attachment, ChannelKind, UserStatus};
 use sivryn_client_core::protocol::permissions::Permissions;
-use sivryn_client_core::protocol::{CategoryId, ChannelId, GuildId, MessageId, UserId};
+use sivryn_client_core::protocol::{CategoryId, ChannelId, GuildId, MessageId, RoleId, UserId};
 
 use super::icons::{Icon, Svg};
 use super::widgets::Slider;
@@ -57,6 +57,10 @@ pub enum MenuAction {
     EditProfile,
     CopyImage(Attachment),
     SaveFile(Attachment),
+    /// Give (`true`) or take a role.
+    SetRole(GuildId, UserId, RoleId, bool),
+    /// Move someone to another voice channel.
+    MoveToVoice(GuildId, UserId, ChannelId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,7 +155,7 @@ pub fn message_items(
     let me = state.me();
     let mine = Some(msg.author) == me;
     let can_moderate =
-        state.guild_of(channel).is_some_and(|g| state.permissions(g).allows(Permissions::MANAGE_MESSAGES));
+        state.guild_of(channel).is_some() && state.channel_permissions(channel).allows(Permissions::MANAGE_MESSAGES);
     let mut items = vec![MenuItem::Reactions { channel, message: msg.id }];
     items.push(MenuItem::action(t("menu.add_reaction"), Icon::Smile, MenuAction::React(channel, msg.id)));
     if !mine {
@@ -219,18 +223,62 @@ pub fn user_items(state: AppState, user: UserId, guild: Option<GuildId>, voice: 
         let perms = state.permissions(guild);
         let owner = state.guild(guild).map(|g| g.owner_id);
         let target_is_owner = owner == Some(user);
+        // Roles below my own highest role can be given and taken.
+        if perms.allows(Permissions::MANAGE_ROLES) {
+            let has = state.member_roles(guild, user);
+            let roles: Vec<MenuItem> = state
+                .roles(guild)
+                .into_iter()
+                .filter(|r| !r.is_everyone && state.outranks(guild, r.position))
+                .map(|r| MenuItem::Check {
+                    label: r.name.clone(),
+                    checked: has.contains(&r.id),
+                    action: MenuAction::SetRole(guild, user, r.id, !has.contains(&r.id)),
+                })
+                .collect();
+            if !roles.is_empty() {
+                items.push(MenuItem::Separator);
+                items.push(MenuItem::Submenu {
+                    label: t("roles.title").into(),
+                    icon: Some(Icon::Shield),
+                    items: roles,
+                });
+            }
+        }
         let mut moderation = Vec::new();
         if let Some(channel) = voice.filter(|_| perms.allows(Permissions::MOVE_MEMBERS)) {
+            let targets: Vec<MenuItem> = state
+                .guilds
+                .read()
+                .iter()
+                .filter(|g| g.guild.id == guild)
+                .flat_map(|g| g.channels.iter())
+                .filter(|c| c.kind == ChannelKind::Voice && c.id != channel)
+                .map(|c| MenuItem::Action {
+                    label: c.name.clone(),
+                    icon: Some(Icon::Volume),
+                    danger: false,
+                    action: MenuAction::MoveToVoice(guild, user, c.id),
+                })
+                .collect();
+            if !targets.is_empty() {
+                moderation.push(MenuItem::Submenu {
+                    label: t("menu.move_to").into(),
+                    icon: Some(Icon::Volume),
+                    items: targets,
+                });
+            }
             moderation.push(MenuItem::danger(
                 t("menu.disconnect"),
                 Icon::PhoneOff,
                 MenuAction::Disconnect(channel, user),
             ));
         }
-        if !target_is_owner && perms.allows(Permissions::KICK_MEMBERS) {
+        let outranked = target_is_owner || !state.outranks(guild, state.top_position(guild, user));
+        if !outranked && perms.allows(Permissions::KICK_MEMBERS) {
             moderation.push(MenuItem::danger(t("menu.kick"), Icon::UserMinus, MenuAction::Kick(guild, user)));
         }
-        if !target_is_owner && perms.allows(Permissions::BAN_MEMBERS) {
+        if !outranked && perms.allows(Permissions::BAN_MEMBERS) {
             moderation.push(MenuItem::danger(t("menu.ban"), Icon::Ban, MenuAction::Ban(guild, user)));
         }
         if !moderation.is_empty() {
@@ -259,7 +307,10 @@ pub fn guild_items(state: AppState, guild: GuildId) -> Vec<MenuItem> {
         items.push(MenuItem::action(t("shell.invite"), Icon::UserPlus, MenuAction::Invite(guild)));
     }
     items.push(MenuItem::action(t("notify.settings"), Icon::Bell, MenuAction::NotifySettings(guild)));
-    if perms.allows(Permissions::MANAGE_GUILD) || perms.allows(Permissions::BAN_MEMBERS) {
+    if perms.allows(Permissions::MANAGE_GUILD)
+        || perms.allows(Permissions::BAN_MEMBERS)
+        || perms.allows(Permissions::MANAGE_ROLES)
+    {
         items.push(MenuItem::action(t("guild.settings"), Icon::Settings, MenuAction::GuildSettings(guild)));
     }
     if !mine {
@@ -464,8 +515,14 @@ pub fn run(mut state: AppState, action: MenuAction) {
         }),
         MenuAction::ChannelSettings(channel) => state.modal.set(Some(Modal::ChannelSettings(channel))),
         MenuAction::OpenVoiceChat(channel) => {
-            state.open_channel(channel);
+            // Opening the chat shows the call it belongs to, without joining.
+            state.home.set(false);
+            if let Some(g) = state.guild_of(channel) {
+                state.guild.set(Some(g));
+            }
+            state.channel.set(Some(channel));
             state.voice_chat.set(true);
+            state.mark_read(channel);
         }
         MenuAction::Mute(channel, minutes) => {
             let until = minutes.map(|m| chrono::Utc::now() + chrono::Duration::minutes(m));
@@ -529,6 +586,13 @@ pub fn run(mut state: AppState, action: MenuAction) {
             state.open_channel(channel);
             super::call::start(state, channel, false);
         }
+        MenuAction::SetRole(guild, user, role, add) => bg(async move {
+            done(s.api.set_member_role(guild, user, role, add).await.map_err(|e| e.to_string()));
+            done(state.refresh().await);
+        }),
+        MenuAction::MoveToVoice(guild, user, channel) => bg(async move {
+            done(s.api.move_voice_member(guild, user, channel).await.map_err(|e| e.to_string()));
+        }),
     }
 }
 

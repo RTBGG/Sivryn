@@ -25,8 +25,12 @@ use crate::session::Session;
 const NONCE_LEN: usize = 24;
 /// Decrypted files kept in memory, so scrolling back doesn't re-download.
 const CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// Larger files are only cached on disk.
+const MAX_MEMORY_CACHED: usize = 24 * 1024 * 1024;
 /// Longest edge of the placeholder sent with images.
 const THUMBNAIL_EDGE: u32 = 48;
+/// Longest edge of the poster a video gets when it is sent.
+const POSTER_EDGE: u32 = 640;
 /// Animated images are capped so a huge GIF can't eat all memory.
 const MAX_FRAMES: usize = 600;
 
@@ -57,6 +61,8 @@ pub struct PendingFile {
     pub name: String,
     pub mime: String,
     pub bytes: Arc<Vec<u8>>,
+    /// Videos: their length.
+    pub duration_ms: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub thumbnail: Option<String>,
@@ -102,7 +108,15 @@ pub fn prepare(name: String, bytes: Vec<u8>) -> PendingFile {
     {
         mime = format.to_mime_type().to_owned();
     }
-    let mut file = PendingFile { name, mime, bytes: Arc::new(bytes), width: None, height: None, thumbnail: None };
+    let mut file = PendingFile {
+        name,
+        mime,
+        bytes: Arc::new(bytes),
+        width: None,
+        height: None,
+        duration_ms: None,
+        thumbnail: None,
+    };
     if file.is_image()
         && let Ok(img) = image::load_from_memory(&file.bytes)
     {
@@ -112,6 +126,23 @@ pub fn prepare(name: String, bytes: Vec<u8>) -> PendingFile {
         let mut png = Vec::new();
         if thumb.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).is_ok() {
             file.thumbnail = Some(B64.encode(png));
+        }
+    }
+    // Videos get their first picture as a poster, so they show something
+    // before anyone presses play.
+    if file.mime.starts_with("video/")
+        && let Some((frame, duration)) = sivryn_media::video_poster(&file.bytes)
+    {
+        file.width = Some(frame.width);
+        file.height = Some(frame.height);
+        file.duration_ms = Some(duration);
+        if let Some(img) = image::RgbaImage::from_raw(frame.width, frame.height, frame.data) {
+            let small = image::DynamicImage::ImageRgba8(img).thumbnail(POSTER_EDGE, POSTER_EDGE).to_rgb8();
+            let mut jpeg = Vec::new();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75);
+            if encoder.encode_image(&small).is_ok() {
+                file.thumbnail = Some(B64.encode(jpeg));
+            }
         }
     }
     file
@@ -126,7 +157,10 @@ pub fn prepare_path(path: &Path) -> Result<PendingFile, String> {
 /// Encrypts and uploads a file; returns what goes into the message.
 pub async fn upload(s: &Session, channel: ChannelId, file: &PendingFile) -> Result<Attachment, String> {
     let (key, sealed) = encrypt(&file.bytes);
-    let uploaded = s.api.upload_attachment(channel, sealed).await.map_err(|e| e.to_string())?;
+    let uploaded = s.api.upload_attachment(channel, sealed.clone()).await.map_err(|e| e.to_string())?;
+    // Big files don't stay in memory: keep the sender's copy on disk, so a
+    // restart doesn't download it again.
+    disk_write(uploaded.id, &sealed).await;
     let attachment = Attachment {
         file_id: uploaded.id,
         name: file.name.clone(),
@@ -135,11 +169,13 @@ pub async fn upload(s: &Session, channel: ChannelId, file: &PendingFile) -> Resu
         key,
         width: file.width,
         height: file.height,
-        duration_ms: None,
+        duration_ms: file.duration_ms,
         thumbnail: file.thumbnail.clone(),
     };
     // The sender has the plaintext already; no need to download it again.
-    cache().put(uploaded.id, file.bytes.clone());
+    if file.bytes.len() <= MAX_MEMORY_CACHED {
+        cache().put(uploaded.id, file.bytes.clone());
+    }
     Ok(attachment)
 }
 
@@ -198,6 +234,12 @@ async fn disk_read(file: FileId) -> Option<Vec<u8>> {
     Some(data)
 }
 
+async fn disk_remove(file: FileId) {
+    if let Some(dir) = disk_dir() {
+        let _ = tokio::fs::remove_file(dir.join(file.to_string())).await;
+    }
+}
+
 async fn disk_write(file: FileId, data: &[u8]) {
     let Some(dir) = disk_dir() else { return };
     if tokio::fs::create_dir_all(&dir).await.is_err() {
@@ -234,25 +276,46 @@ pub fn prune_disk_cache() {
 }
 
 /// The file's bytes as the server stores them: memory and disk cache first.
-async fn download(s: &Session, file: FileId) -> Result<Vec<u8>, String> {
+async fn download(s: &Session, file: FileId, progress: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
     if let Some(data) = disk_read(file).await {
         return Ok(data);
     }
-    let data = s.api.download_file(file).await.map_err(|e| e.to_string())?;
+    let data = s.api.download_file_with_progress(file, progress).await.map_err(|e| e.to_string())?;
     disk_write(file, &data).await;
     Ok(data)
 }
 
 /// Downloads and decrypts an attachment (cached in memory and on disk).
 pub async fn fetch(s: &Session, attachment: &Attachment) -> Result<Arc<Vec<u8>>, String> {
+    fetch_with_progress(s, attachment, |_, _| {}).await
+}
+
+/// [`fetch`], reporting download progress (bytes so far, total) when the
+/// file isn't cached.
+pub async fn fetch_with_progress(
+    s: &Session,
+    attachment: &Attachment,
+    progress: impl FnMut(u64, Option<u64>),
+) -> Result<Arc<Vec<u8>>, String> {
     if let Some(data) = cache().get(attachment.file_id) {
         return Ok(data);
     }
-    let sealed = download(s, attachment.file_id).await?;
+    let sealed = download(s, attachment.file_id, progress).await?;
     let key = attachment.key.clone();
-    let plain = tokio::task::spawn_blocking(move || decrypt(&key, &sealed)).await.map_err(|e| e.to_string())??;
+    let plain = match tokio::task::spawn_blocking(move || decrypt(&key, &sealed)).await.map_err(|e| e.to_string())? {
+        Ok(plain) => plain,
+        Err(e) => {
+            // A damaged copy (e.g. a cut-off download) must not stay cached.
+            disk_remove(attachment.file_id).await;
+            return Err(e);
+        }
+    };
     let data = Arc::new(plain);
-    cache().put(attachment.file_id, data.clone());
+    // Big files (videos) aren't kept decrypted in memory; the disk cache
+    // still saves downloading them again.
+    if data.len() <= MAX_MEMORY_CACHED {
+        cache().put(attachment.file_id, data.clone());
+    }
     Ok(data)
 }
 
@@ -262,7 +325,7 @@ pub async fn fetch_plain(s: &Session, file: FileId) -> Result<Arc<Vec<u8>>, Stri
     if let Some(data) = cache().get(file) {
         return Ok(data);
     }
-    let data = Arc::new(download(s, file).await?);
+    let data = Arc::new(download(s, file, |_, _| {}).await?);
     cache().put(file, data.clone());
     Ok(data)
 }
@@ -325,20 +388,83 @@ pub fn decode(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Decoded, String> {
     Ok(Decoded { width, height, frames: vec![(to_frame(fit(img)), Duration::ZERO)] })
 }
 
-/// Prepares a profile picture (256 px square) or banner (960×340) for
-/// upload, cropped to fill. Small animated GIFs are kept as they are.
-/// Returns the content type and the bytes.
-pub fn profile_image(bytes: &[u8], banner: bool) -> Result<(&'static str, Vec<u8>), String> {
+/// A rectangle of an image, in its own pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crop {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Largest upload for avatars, banners and server icons.
+const MAX_PROFILE_IMAGE: usize = 4 * 1024 * 1024;
+
+/// Cuts `crop` out of an image and scales it to `size` (avatars and icons
+/// 256², banners 960×340). Animated GIFs are cut frame by frame and stay
+/// animated; if the result is too big, every other frame is dropped (with
+/// the delays added up). Returns the content type and the bytes.
+pub fn crop_image(bytes: &[u8], crop: Crop, size: (u32, u32)) -> Result<(&'static str, Vec<u8>), String> {
+    use image::AnimationDecoder;
     let format = image::guess_format(bytes).map_err(|_| "not an image".to_string())?;
-    if format == image::ImageFormat::Gif && bytes.len() <= 4 * 1024 * 1024 {
-        return Ok(("image/gif", bytes.to_vec()));
+    if format == image::ImageFormat::Gif {
+        let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+        let frames: Vec<image::Frame> =
+            decoder.into_frames().take(MAX_FRAMES).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+        if frames.len() > 1 {
+            let cut: Vec<(image::RgbaImage, u32)> = frames
+                .iter()
+                .map(|f| {
+                    let (num, den) = f.delay().numer_denom_ms();
+                    let piece = image::imageops::crop_imm(f.buffer(), crop.x, crop.y, crop.w, crop.h).to_image();
+                    let scaled = image::imageops::resize(&piece, size.0, size.1, image::imageops::FilterType::Triangle);
+                    (scaled, num.checked_div(den).unwrap_or(100))
+                })
+                .collect();
+            let mut step = 1;
+            loop {
+                let gif = encode_gif(&cut, step)?;
+                if gif.len() <= MAX_PROFILE_IMAGE || step >= 8 {
+                    return Ok(("image/gif", gif));
+                }
+                step *= 2;
+            }
+        }
     }
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-    let (w, h) = if banner { (960, 340) } else { (256, 256) };
-    let filled = img.resize_to_fill(w, h, image::imageops::FilterType::Lanczos3);
+    let piece = img.crop_imm(crop.x, crop.y, crop.w, crop.h);
+    let scaled = piece.resize_exact(size.0, size.1, image::imageops::FilterType::Lanczos3);
     let mut out = Vec::new();
-    filled.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    scaled.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
     Ok(("image/png", out))
+}
+
+/// An animated GIF from every `step`-th frame (delays in milliseconds).
+fn encode_gif(frames: &[(image::RgbaImage, u32)], step: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
+        encoder.set_repeat(image::codecs::gif::Repeat::Infinite).map_err(|e| e.to_string())?;
+        for chunk in frames.chunks(step) {
+            let delay: u32 = chunk.iter().map(|(_, d)| *d).sum();
+            let frame =
+                image::Frame::from_parts(chunk[0].0.clone(), 0, 0, image::Delay::from_numer_denom_ms(delay.max(20), 1));
+            encoder.encode_frame(frame).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out)
+}
+
+/// The largest rectangle with the aspect `w:h` in the middle of an image.
+pub fn centered_crop(width: u32, height: u32, aspect: (u32, u32)) -> Crop {
+    let target = aspect.0 as f64 / aspect.1 as f64;
+    let (w, h) = if width as f64 / height as f64 > target {
+        ((height as f64 * target).round() as u32, height)
+    } else {
+        (width, (width as f64 / target).round() as u32)
+    };
+    let (w, h) = (w.clamp(1, width), h.clamp(1, height));
+    Crop { x: (width - w) / 2, y: (height - h) / 2, w, h }
 }
 
 /// Makes everything outside the inscribed circle transparent (avatars).
@@ -374,6 +500,43 @@ pub fn play(decoded: Decoded) -> watch::Receiver<Option<Arc<RgbaFrame>>> {
                         return;
                     }
                     tokio::time::sleep(*delay).await;
+                }
+            }
+        });
+    }
+    rx
+}
+
+/// Like [`play`], but an animation only runs while `gate` is true; otherwise
+/// it rests on its first frame. Avatars, banners and server icons animate
+/// only while hovered: every frame repaints the whole window.
+pub fn play_gated(decoded: Decoded, mut gate: watch::Receiver<bool>) -> watch::Receiver<Option<Arc<RgbaFrame>>> {
+    let first = decoded.frames.first().map(|f| f.0.clone());
+    let (tx, rx) = watch::channel(first.clone());
+    if decoded.frames.len() > 1 {
+        tokio::spawn(async move {
+            loop {
+                // Resting: the first frame until the gate opens.
+                while !*gate.borrow_and_update() {
+                    if tx.send(first.clone()).is_err() || gate.changed().await.is_err() {
+                        return;
+                    }
+                }
+                for (frame, delay) in &decoded.frames {
+                    if !*gate.borrow() {
+                        break;
+                    }
+                    if tx.send(Some(frame.clone())).is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(*delay) => {}
+                        changed = gate.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -417,6 +580,40 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crops_keep_the_aspect_and_gifs_stay_animated() {
+        assert_eq!(centered_crop(400, 200, (1, 1)), Crop { x: 100, y: 0, w: 200, h: 200 });
+        assert_eq!(centered_crop(960, 1000, (960, 340)), Crop { x: 0, y: 330, w: 960, h: 340 });
+
+        // A two-frame GIF, red then blue.
+        let mut gif = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut gif);
+            for color in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+                let img = image::RgbaImage::from_pixel(40, 20, image::Rgba(color));
+                enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1)))
+                    .unwrap();
+            }
+        }
+        let crop = centered_crop(40, 20, (1, 1));
+        let (mime, out) = crop_image(&gif, crop, (16, 16)).unwrap();
+        assert_eq!(mime, "image/gif");
+        let decoded = decode(&out, 64, 64).unwrap();
+        assert_eq!(decoded.frames.len(), 2);
+        assert_eq!((decoded.frames[0].0.width, decoded.frames[0].0.height), (16, 16));
+
+        let png = {
+            let mut out = Vec::new();
+            image::RgbaImage::from_pixel(30, 10, image::Rgba([0, 255, 0, 255]))
+                .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
+            out
+        };
+        let (mime, out) = crop_image(&png, centered_crop(30, 10, (960, 340)), (96, 34)).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(image::load_from_memory(&out).unwrap().width(), 96);
+    }
 
     #[test]
     fn attachments_round_trip_and_reject_wrong_keys() {

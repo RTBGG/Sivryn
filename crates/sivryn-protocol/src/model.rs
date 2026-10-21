@@ -182,6 +182,10 @@ pub struct Channel {
     /// The category it is listed under (guild channels only).
     #[serde(default)]
     pub category_id: Option<CategoryId>,
+    /// Permission changes for roles or members in this channel, applied
+    /// after the category's (guild channels only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overwrites: Vec<PermissionOverwrite>,
 }
 
 /// A named group of channels in a guild's channel list.
@@ -191,6 +195,9 @@ pub struct Category {
     pub guild_id: GuildId,
     pub name: String,
     pub position: i32,
+    /// Permission changes for every channel in the category.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overwrites: Vec<PermissionOverwrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +206,33 @@ pub struct Role {
     pub guild_id: GuildId,
     pub name: String,
     pub permissions: Permissions,
+    /// Rank: higher roles come first and can manage lower ones. `@everyone` is 0.
     pub position: i32,
+    /// Name color in the member list, as `0xRRGGBB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Members with this role are listed in their own group.
+    #[serde(default)]
+    pub hoist: bool,
+    /// The implicit role every member has.
+    #[serde(default)]
+    pub is_everyone: bool,
+}
+
+/// Who a permission overwrite applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "id", rename_all = "snake_case")]
+pub enum OverwriteTarget {
+    Role(RoleId),
+    Member(UserId),
+}
+
+/// Allows or denies permissions for a role or member in a channel or category.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionOverwrite {
+    pub target: OverwriteTarget,
+    pub allow: Permissions,
+    pub deny: Permissions,
 }
 
 /// A chat message.

@@ -68,6 +68,12 @@ puts screen sharing quality first, then easy self-hosting, then everything else.
 
    AV1/VP9 use `L1T3` (temporal SVC only), so weak viewers get fewer fps but full
    resolution. H.264 uses simulcast.
+   **HDR displays**: libwebrtc captures 8-bit frames, which look washed out from an HDR desktop.
+   For a screen or window on a display with HDR on (DXGI color space G2084), Sivryn captures
+   with Windows Graphics Capture in 16-bit float (scRGB) instead and tone-maps on the GPU with
+   a D3D11 compute shader: divide by Windows' SDR white level (so SDR content looks as on an
+   SDR screen), keep values below a knee, roll the highlights off smoothly, encode as sRGB.
+   The result enters the normal path through libyuv.
 5. **Receive**: decoded frames → RGBA → `watch` channel (latest frame only, no lag build-up)
    → `VideoSurface` uploads to a wgpu texture and draws it letterboxed into the canvas.
 
@@ -129,6 +135,24 @@ far behind is disconnected and resyncs on reconnect.
 
 Presence carries a status (online, away, busy). Invisible users are announced as offline to
 everyone else; busy users get no desktop notifications.
+
+## Roles and channel permissions
+
+Permissions are a 64-bit mask per role. A member's guild permissions are the union of
+`@everyone` and their roles; the owner and administrators have everything. In a channel,
+overwrites are applied Discord style, the category's first, then the channel's: within each,
+`@everyone`, then all of the member's roles together (denies before allows), then the member's
+own overwrite. The same function (`sivryn_protocol::permissions::channel_permissions`) runs on
+the server, which enforces it, and is reported to clients per channel.
+
+Members can only manage roles and members below their own highest role and can't grant
+permissions they lack. Channels someone can't see are left out of their guild, their read
+states and voice lists; events about them only go to those who can see them.
+
+Private channels stay end-to-end encrypted for exactly their readers: `/channels/{id}/members`
+returns only members who may view the channel, and when roles or overwrites change the server
+sends `ChannelAccessChanged`, after which devices in the channel's MLS group add the members who
+gained access and remove those who lost it.
 
 ## Read states and notifications
 

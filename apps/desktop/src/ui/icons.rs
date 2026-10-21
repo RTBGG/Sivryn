@@ -23,6 +23,7 @@ pub enum Icon {
     LogOut,
     Maximize,
     Mic,
+    Minimize,
     MicOff,
     Monitor,
     MonitorOff,
@@ -64,6 +65,11 @@ pub enum Icon {
     Users,
     Folder,
     BellOff,
+    Crown,
+    ArrowUp,
+    ArrowDown,
+    VolumeX,
+    Shield,
 }
 
 /// Shapes in a 24×24 box, stroked with width 2 and round caps/joins.
@@ -102,6 +108,7 @@ fn shapes(icon: Icon) -> &'static [Shape] {
         Icon::LogIn => &[Path("M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"), Path("m10 17 5-5-5-5"), Path("M15 12H3")],
         Icon::LogOut => &[Path("M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"), Path("m16 17 5-5-5-5"), Path("M21 12H9")],
         Icon::Maximize => &[Path("M15 3h6v6"), Path("M9 21H3v-6"), Path("M21 3l-7 7"), Path("M3 21l7-7")],
+        Icon::Minimize => &[Path("M4 14h6v6"), Path("M20 10h-6V4"), Path("M14 10l7-7"), Path("M3 21l7-7")],
         Icon::Mic => &[
             Path("M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"),
             Path("M19 10v2a7 7 0 0 1-14 0v-2"),
@@ -230,6 +237,24 @@ fn shapes(icon: Icon) -> &'static [Shape] {
             Path("M10.3 21a1.94 1.94 0 0 0 3.4 0"),
             Path("m2 2 20 20"),
         ],
+        Icon::Crown => &[
+            Path(
+                "M11.56 3.27a.5.5 0 0 1 .88 0l2.95 5.6a1 1 0 0 0 1.52.3l4.27-3.66a.5.5 0 0 1 .8.52l-2.83 10.24a1 1 0 0 1-.96.73H5.81a1 1 0 0 1-.96-.73L2.02 6.02a.5.5 0 0 1 .8-.52l4.27 3.66a1 1 0 0 0 1.52-.3z",
+            ),
+            Path("M5 21h14"),
+        ],
+        Icon::ArrowUp => &[Path("m5 12 7-7 7 7"), Path("M12 19V5")],
+        Icon::ArrowDown => &[Path("M12 5v14"), Path("m19 12-7 7-7-7")],
+        Icon::VolumeX => &[
+            Path(
+                "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z",
+            ),
+            Path("m22 9-6 6"),
+            Path("m16 9 6 6"),
+        ],
+        Icon::Shield => &[Path(
+            "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+        )],
         Icon::Users => &[
             Path("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"),
             Circle(9.0, 7.0, 4.0),

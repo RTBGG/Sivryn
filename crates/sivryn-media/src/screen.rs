@@ -66,7 +66,13 @@ pub struct ScreenShare {
     room: Arc<Room>,
     track_sid: livekit::id::TrackSid,
     pub codec: CodecChoice,
+    /// A small local preview of what is shared, like a remote feed.
+    pub preview: crate::VideoFeed,
 }
+
+/// Frame interval of the local screen share preview: the picture as it is
+/// sent, in the full stream resolution, at 30 frames per second.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(33);
 
 impl ScreenShare {
     pub async fn start(
@@ -105,9 +111,16 @@ impl ScreenShare {
         let publication = room.local_participant().publish_track(LocalTrack::Video(track), options).await?;
 
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = spawn_capture(source.clone(), limits.clone(), video_source, stop.clone()).await?;
+        let (preview_tx, preview_rx) = tokio::sync::watch::channel(None);
+        let thread = spawn_capture(source.clone(), limits.clone(), video_source, preview_tx, stop.clone()).await?;
+        let preview = crate::VideoFeed {
+            participant: room.local_participant().identity().to_string(),
+            source: TrackSource::Screenshare,
+            track_sid: format!("local-screen-{}", publication.sid()),
+            frames: preview_rx,
+        };
 
-        Ok(Self { stop, thread: Some(thread), room, track_sid: publication.sid(), codec })
+        Ok(Self { stop, thread: Some(thread), room, track_sid: publication.sid(), codec, preview })
     }
 
     pub async fn stop(mut self) {
@@ -131,12 +144,48 @@ impl Drop for ScreenShare {
     }
 }
 
+/// What happens to every captured picture: scaled to the limits, shown in
+/// the local preview now and then, and handed to the encoder.
+struct Delivery {
+    limits: ScreenShareLimits,
+    video_source: NativeVideoSource,
+    preview: tokio::sync::watch::Sender<Option<Arc<crate::RgbaFrame>>>,
+    started: Instant,
+    last_preview: Instant,
+}
+
+impl Delivery {
+    fn frame(&mut self, mut i420: I420Buffer, w: u32, h: u32) {
+        let (tw, th) = fit(w, h, self.limits.max_width, self.limits.max_height);
+        let buffer = if (tw, th) != (w, h) { i420.scale(tw as i32, th as i32) } else { i420 };
+
+        // The local preview shows exactly what is sent (libyuv does the
+        // scaling and the colour conversion).
+        if self.last_preview.elapsed() >= PREVIEW_INTERVAL && self.preview.receiver_count() > 0 {
+            self.last_preview = Instant::now();
+            let (pw, ph, source) = (tw, th, &buffer);
+            let mut data = vec![0u8; (pw * ph * 4) as usize];
+            let (y, u, v) = source.data();
+            let (sy, su, sv) = source.strides();
+            // libyuv's "ABGR" is R, G, B, A in memory.
+            yuv_helper::i420_to_abgr(y, sy, u, su, v, sv, &mut data, pw * 4, pw as i32, ph as i32);
+            let _ = self.preview.send(Some(Arc::new(crate::RgbaFrame { width: pw, height: ph, data })));
+        }
+
+        let mut out = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
+        out.timestamp_us = self.started.elapsed().as_micros() as i64;
+        self.video_source.capture_frame(&out);
+    }
+}
+
 /// Runs the capturer on its own thread: platform capturers are not `Send`
-/// and expect to be driven from the thread that created them.
+/// and expect to be driven from the thread that created them. Sources on an
+/// HDR display use Sivryn's own capture with tone mapping instead.
 async fn spawn_capture(
     source: ScreenSource,
     limits: ScreenShareLimits,
     video_source: NativeVideoSource,
+    preview: tokio::sync::watch::Sender<Option<Arc<crate::RgbaFrame>>>,
     stop: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, MediaError> {
     // Awaited, not blocked on: callers run on the UI thread.
@@ -145,6 +194,50 @@ async fn spawn_capture(
     let thread = std::thread::Builder::new()
         .name("sivryn-screen-capture".into())
         .spawn(move || {
+            let interval = Duration::from_secs_f64(1.0 / limits.max_fps.max(1) as f64);
+            let mut delivery = Delivery {
+                limits: limits.clone(),
+                video_source,
+                preview,
+                started: Instant::now(),
+                last_preview: Instant::now() - PREVIEW_INTERVAL,
+            };
+
+            #[cfg(windows)]
+            if let Some(hdr_display) = crate::hdr_capture::hdr_display(&source) {
+                match crate::hdr_capture::HdrCapture::start(&source, hdr_display) {
+                    Ok(mut hdr) => {
+                        tracing::info!(
+                            sdr_white = hdr_display.sdr_white,
+                            peak = hdr_display.peak,
+                            "sharing an HDR display, tone-mapped to SDR"
+                        );
+                        let _ = ready_tx.send(Ok(()));
+                        let mut next = Instant::now();
+                        while !stop.load(Ordering::Relaxed) {
+                            if let Some((data, w, h)) = hdr.next_frame() {
+                                let (ew, eh) = (w & !1, h & !1);
+                                if ew > 0 && eh > 0 {
+                                    let mut i420 = I420Buffer::new(ew, eh);
+                                    let (sy, su, sv) = i420.strides();
+                                    let (y, u, v) = i420.data_mut();
+                                    // RGBA, which libyuv calls "ABGR".
+                                    yuv_helper::abgr_to_i420(&data, w * 4, y, sy, u, su, v, sv, ew as i32, eh as i32);
+                                    delivery.frame(i420, ew, eh);
+                                }
+                            }
+                            next += interval;
+                            match next.checked_duration_since(Instant::now()) {
+                                Some(wait) => std::thread::sleep(wait),
+                                None => next = Instant::now(),
+                            }
+                        }
+                        return;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "HDR capture unavailable, sharing without tone mapping"),
+                }
+            }
+
             let Some(mut capturer) = capturer(source.kind) else {
                 let _ = ready_tx.send(Err(MediaError::CaptureUnavailable));
                 return;
@@ -154,7 +247,6 @@ async fn spawn_capture(
                 return;
             };
 
-            let started = Instant::now();
             capturer.start_capture(Some(target), move |result| match result {
                 Ok(frame) => {
                     let (w, h) = (frame.width() & !1, frame.height() & !1);
@@ -166,19 +258,12 @@ async fn spawn_capture(
                     let (sy, su, sv) = i420.strides();
                     let (y, u, v) = i420.data_mut();
                     yuv_helper::argb_to_i420(frame.data(), frame.stride(), y, sy, u, su, v, sv, w, h);
-
-                    let (tw, th) = fit(w as u32, h as u32, limits.max_width, limits.max_height);
-                    let buffer = if (tw, th) != (w as u32, h as u32) { i420.scale(tw as i32, th as i32) } else { i420 };
-
-                    let mut out = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-                    out.timestamp_us = started.elapsed().as_micros() as i64;
-                    video_source.capture_frame(&out);
+                    delivery.frame(i420, w as u32, h as u32);
                 }
                 Err(e) => tracing::trace!(?e, "capture frame failed"),
             });
             let _ = ready_tx.send(Ok(()));
 
-            let interval = Duration::from_secs_f64(1.0 / limits.max_fps.max(1) as f64);
             let mut next = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 capturer.capture_frame();

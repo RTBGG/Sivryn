@@ -104,6 +104,8 @@ impl<Rend: WindowRenderer> View<Rend> {
         if let Some(title) = title {
             winit_window.set_title(&title);
         }
+        crate::canvas_frames::register(proxy.clone(), winit_window.id());
+        crate::fullscreen::register(winit_window.clone());
 
         Self {
             renderer: config.renderer,
@@ -197,6 +199,9 @@ impl<Rend: WindowRenderer> View<Rend> {
     }
 
     pub fn poll(&mut self) -> bool {
+        if crate::canvas_frames::take_pending() {
+            self.request_redraw();
+        }
         if let Some(waker) = &self.waker {
             let cx = std::task::Context::from_waker(waker);
             if self.doc.poll(Some(cx)) {
@@ -397,6 +402,14 @@ impl<Rend: WindowRenderer> View<Rend> {
             WindowEvent::CursorMoved { position, .. } => {
                 let winit::dpi::LogicalPosition::<f32> { x, y } = position.to_logical(self.window.scale_factor());
                 self.mouse_pos = (x, y);
+                // Sivryn patch: scroll bars (blitz-dom's scrollbar.rs).
+                let (consumed, repaint) = self.doc.scrollbar_move(x, y);
+                if repaint {
+                    self.request_redraw();
+                }
+                if consumed {
+                    return;
+                }
                 let event = UiEvent::MouseMove(BlitzMouseButtonEvent {
                     x,
                     y,
@@ -439,6 +452,20 @@ impl<Rend: WindowRenderer> View<Rend> {
                         self.stop_autoscroll();
                     }
                     return;
+                }
+
+                // Sivryn patch: a press on a scroll bar drags it; the page sees neither
+                // the press nor its release.
+                if button == MouseEventButton::Main {
+                    let (x, y) = self.mouse_pos;
+                    let handled = match state {
+                        ElementState::Pressed => self.doc.scrollbar_press(x, y),
+                        ElementState::Released => self.doc.scrollbar_release(),
+                    };
+                    if handled {
+                        self.request_redraw();
+                        return;
+                    }
                 }
 
                 match state {

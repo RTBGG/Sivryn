@@ -12,7 +12,7 @@ use sivryn_client_core::protocol::{CategoryId, ChannelId, GuildId, UserId};
 
 use super::icons::{Icon, Svg};
 use super::widgets::{Avatar, IconButton};
-use super::{AppState, MenuItem, Modal, menu};
+use super::{AppState, MenuItem, Modal, dnd, menu};
 use crate::i18n::t;
 
 /// Header with the server name; clicking it unfolds the server menu below.
@@ -39,7 +39,7 @@ pub fn GuildHeader(guild: GuildId, name: String) -> Element {
                     MenuRowButton { label: t("shell.invite"), icon: Icon::UserPlus,
                         onclick: move |_| close_and(Box::new(move || menu::run(state, menu::MenuAction::Invite(guild)))) }
                 }
-                if perms.allows(Permissions::MANAGE_GUILD) || perms.allows(Permissions::BAN_MEMBERS) {
+                if perms.allows(Permissions::MANAGE_GUILD) || perms.allows(Permissions::BAN_MEMBERS) || perms.allows(Permissions::MANAGE_ROLES) {
                     MenuRowButton { label: t("guild.settings"), icon: Icon::Settings,
                         onclick: move |_| close_and(Box::new(move || menu::run(state, menu::MenuAction::GuildSettings(guild)))) }
                 }
@@ -138,6 +138,8 @@ pub fn ChannelList(guild: GuildWithChannels) -> Element {
     channels.sort_by_key(|c| (c.kind == ChannelKind::Voice, c.position));
     let loose: Vec<Channel> = channels.iter().filter(|c| c.category_id.is_none()).cloned().collect();
     let selected = *state.channel.read();
+    let dragging = dnd::active(&state);
+    let target = dnd::target(&state);
 
     rsx! {
         div {
@@ -157,13 +159,23 @@ pub fn ChannelList(guild: GuildWithChannels) -> Element {
                     let in_category: Vec<Channel> = channels.iter().filter(|c| c.category_id == Some(id)).cloned().collect();
                     rsx! {
                         div { key: "{id}", class: "category-block",
+                            if target == Some(dnd::DropTarget::BeforeCategory(id)) {
+                                div { class: "drop-line" }
+                            }
                             div {
                                 class: "category with-action",
-                                onclick: move |_| menu::run(state, menu::MenuAction::ToggleCategory(id)),
+                                onclick: move |_| {
+                                    if !dnd::just_dragged() {
+                                        menu::run(state, menu::MenuAction::ToggleCategory(id));
+                                    }
+                                },
                                 onmousedown: move |e| {
                                     if let Some((x, y)) = menu::right_click(&e) {
                                         e.stop_propagation();
                                         menu::open(state, x, y, category_items(state, gid, id));
+                                    } else if can_manage {
+                                        e.stop_propagation();
+                                        dnd::begin(state, gid, dnd::DragItem::Category(id), &e);
                                     }
                                 },
                                 span { class: "category-name",
@@ -181,12 +193,34 @@ pub fn ChannelList(guild: GuildWithChannels) -> Element {
                                         Svg { icon: Icon::Plus, size: 16 }
                                     }
                                 }
+                                // Drop zones while dragging: a channel lands at the
+                                // top of the category, a category before or after it.
+                                match dragging {
+                                    Some(dnd::DragItem::Channel(_)) => rsx! {
+                                        div { class: "drop-zones",
+                                            div { class: "drop-zone full", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::IntoCategory(id)) }
+                                        }
+                                    },
+                                    Some(dnd::DragItem::Category(_)) => rsx! {
+                                        div { class: "drop-zones",
+                                            div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::BeforeCategory(id)) }
+                                            div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::AfterCategory(id)) }
+                                        }
+                                    },
+                                    _ => rsx! {},
+                                }
+                            }
+                            if target == Some(dnd::DropTarget::IntoCategory(id)) {
+                                div { class: "drop-line" }
                             }
                             for c in in_category {
                                 // A folded category still shows the open channel.
                                 if !folded || selected == Some(c.id) {
                                     ChannelRow { key: "{c.id}", channel: c.clone(), selected: selected == Some(c.id), afk: guild.guild.afk_channel_id == Some(c.id) }
                                 }
+                            }
+                            if target == Some(dnd::DropTarget::AfterCategory(id)) {
+                                div { class: "drop-line" }
                             }
                         }
                     }
@@ -222,26 +256,39 @@ fn ChannelRow(channel: Channel, selected: bool, afk: bool) -> Element {
         (false, true, _) => "channel unread",
         _ => "channel",
     };
+    let dragging = dnd::active(&state);
+    let target = dnd::target(&state);
+    let can_move_people = gid.is_some_and(|g| state.permissions(g).allows(Permissions::MOVE_MEMBERS));
     let open = move |_| {
-        if tool_clicked_just_now() {
+        if tool_clicked_just_now() || dnd::just_dragged() {
+            return;
+        }
+        if voice {
+            // Voice channels join right away.
+            super::call::join_channel(state, id);
             return;
         }
         state.channel.set(Some(id));
         state.voice_chat.set(false);
-        if !voice {
-            state.mark_read(id);
-        }
+        state.mark_read(id);
     };
 
+    let drop_class = if voice && target == Some(dnd::DropTarget::Voice(id)) { " drop-into" } else { "" };
     rsx! {
         div {
+            if target == Some(dnd::DropTarget::BeforeChannel(id)) {
+                div { class: "drop-line" }
+            }
             div {
-                class: "{class}",
+                class: "{class}{drop_class}",
                 onclick: open,
                 onmousedown: move |e| {
                     if let Some((x, y)) = menu::right_click(&e) {
                         e.stop_propagation();
                         menu::open(state, x, y, menu::channel_items(state, id));
+                    } else if let Some(g) = gid.filter(|_| can_manage) {
+                        e.stop_propagation();
+                        dnd::begin(state, g, dnd::DragItem::Channel(id), &e);
                     }
                 },
                 if voice { Svg { icon: Icon::Volume, size: 18 } } else { Svg { icon: Icon::Hash, size: 18 } }
@@ -260,7 +307,12 @@ fn ChannelRow(channel: Channel, selected: bool, afk: bool) -> Element {
                             onclick: move |e| {
                                 e.stop_propagation();
                                 TOOL_CLICKED.with(|c| c.set(Some(std::time::Instant::now())));
-                                menu::run(state, menu::MenuAction::OpenVoiceChat(id));
+                                // The same button closes the chat again.
+                                if *state.voice_chat.peek() && *state.channel.peek() == Some(id) {
+                                    state.voice_chat.set(false);
+                                } else {
+                                    menu::run(state, menu::MenuAction::OpenVoiceChat(id));
+                                }
                             },
                             Svg { icon: Icon::Message, size: 15 }
                         }
@@ -278,9 +330,26 @@ fn ChannelRow(channel: Channel, selected: bool, afk: bool) -> Element {
                         }
                     }
                 }
+                match dragging {
+                    Some(dnd::DragItem::Channel(_)) => rsx! {
+                        div { class: "drop-zones",
+                            div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::BeforeChannel(id)) }
+                            div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::AfterChannel(id)) }
+                        }
+                    },
+                    Some(dnd::DragItem::Member { .. }) if voice => rsx! {
+                        div { class: "drop-zones",
+                            div { class: "drop-zone full", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::Voice(id)) }
+                        }
+                    },
+                    _ => rsx! {},
+                }
+            }
+            if target == Some(dnd::DropTarget::AfterChannel(id)) {
+                div { class: "drop-line" }
             }
             if voice {
-                VoiceMembers { channel: id }
+                VoiceMembers { channel: id, can_move: can_move_people }
             }
         }
     }
@@ -288,57 +357,119 @@ fn ChannelRow(channel: Channel, selected: bool, afk: bool) -> Element {
 
 /// Who is in a voice channel (the live room while connected to it).
 #[component]
-fn VoiceMembers(channel: ChannelId) -> Element {
-    let state = use_context::<AppState>();
+fn VoiceMembers(channel: ChannelId, can_move: bool) -> Element {
+    let mut state = use_context::<AppState>();
+    let me = state.me();
+    let dragging = dnd::active(&state);
+    // Someone dragged here shows up at the end, half transparent.
+    let incoming = match (dragging, dnd::target(&state)) {
+        (Some(dnd::DragItem::Member { user, .. }), Some(dnd::DropTarget::Voice(t))) if t == channel => Some(user),
+        _ => None,
+    };
     let call = state.call.read();
     let voice = state.voice.read();
     let guild = state.guild_of(channel);
-    let people: Vec<(Option<UserId>, String, bool, bool, bool)> = match call.as_ref().filter(|c| c.channel == channel) {
+    let people: Vec<VoicePerson> = match call.as_ref().filter(|c| c.channel == channel) {
         Some(live) => live
             .participants
             .iter()
             .map(|p| {
                 let id: Option<UserId> = p.identity.parse().ok();
                 let name = id.map(|id| state.display_name_in(guild, id)).unwrap_or_else(|| p.name.clone());
-                (id, name, p.muted, p.sharing, live.speakers.contains(&p.identity))
+                VoicePerson {
+                    id,
+                    name,
+                    muted: p.muted,
+                    deafened: p.deafened,
+                    sharing: p.sharing,
+                    speaking: live.speakers.contains(&p.identity),
+                }
             })
             .collect(),
         None => voice
             .get(&channel)
             .into_iter()
             .flatten()
-            .map(|p| (Some(p.user_id), state.display_name_in(guild, p.user_id), p.muted, p.screen_sharing, false))
+            .map(|p| VoicePerson {
+                id: Some(p.user_id),
+                name: state.display_name_in(guild, p.user_id),
+                muted: p.muted,
+                deafened: p.deafened,
+                sharing: p.screen_sharing,
+                speaking: false,
+            })
             .collect(),
     };
     drop(call);
     drop(voice);
-    if people.is_empty() {
+    let incoming = incoming.filter(|u| !people.iter().any(|p| p.id == Some(*u)));
+    if people.is_empty() && incoming.is_none() {
         return rsx! {};
     }
     rsx! {
         div { class: "voice-members",
-            for (i, (id, name, muted, sharing, speaking)) in people.into_iter().enumerate() {
-                div {
-                    key: "{i}",
-                    class: "voice-member",
-                    onmousedown: move |e| {
-                        if let (Some(user), Some((x, y))) = (id, menu::right_click(&e)) {
-                            e.stop_propagation();
-                            menu::open(state, x, y, menu::user_items(state, user, guild, Some(channel)));
+            for (i, p) in people.into_iter().enumerate() {
+                {
+                    let VoicePerson { id, name, muted, deafened, sharing, speaking } = p;
+                    let draggable = id.is_some_and(|u| can_move || Some(u) == me);
+                    rsx! {
+                        div {
+                            key: "{i}",
+                            class: "voice-member",
+                            // Left click: the profile.
+                            onclick: move |_| {
+                                if let Some(user) = id.filter(|_| !dnd::just_dragged()) {
+                                    state.modal.set(Some(Modal::Profile(user)));
+                                }
+                            },
+                            onmousedown: move |e| {
+                                let Some(user) = id else { return };
+                                if let Some((x, y)) = menu::right_click(&e) {
+                                    e.stop_propagation();
+                                    menu::open(state, x, y, menu::user_items(state, user, guild, Some(channel)));
+                                } else if let Some(g) = guild.filter(|_| draggable) {
+                                    e.stop_propagation();
+                                    dnd::begin(state, g, dnd::DragItem::Member { user, from: channel }, &e);
+                                }
+                            },
+                            Avatar { name: name.clone(), id, size: 22, speaking }
+                            span { class: "voice-member-name", "{name}" }
+                            if sharing {
+                                span { class: "live-badge", "LIVE" }
+                            }
+                            if deafened {
+                                span { class: "member-muted", Svg { icon: Icon::HeadphonesOff, size: 14 } }
+                            } else if muted {
+                                span { class: "member-muted", Svg { icon: Icon::MicOff, size: 14 } }
+                            }
+                            if matches!(dragging, Some(dnd::DragItem::Member { .. })) {
+                                div { class: "drop-zones",
+                                    div { class: "drop-zone full", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::Voice(channel)) }
+                                }
+                            }
                         }
-                    },
-                    Avatar { name: name.clone(), id, size: 22, speaking }
-                    span { class: "voice-member-name", "{name}" }
-                    if sharing {
-                        span { class: "live-badge", "LIVE" }
                     }
-                    if muted {
-                        span { class: "member-muted", Svg { icon: Icon::MicOff, size: 14 } }
-                    }
+                }
+            }
+            if let Some(user) = incoming {
+                div { class: "voice-member incoming",
+                    Avatar { name: state.display_name_in(guild, user), id: Some(user), size: 22 }
+                    span { class: "voice-member-name", "{state.display_name_in(guild, user)}" }
                 }
             }
         }
     }
+}
+
+/// One row in a voice channel's member list.
+#[derive(Clone, PartialEq)]
+struct VoicePerson {
+    id: Option<UserId>,
+    name: String,
+    muted: bool,
+    deafened: bool,
+    sharing: bool,
+    speaking: bool,
 }
 
 /// Text or voice channel, optionally in a category.

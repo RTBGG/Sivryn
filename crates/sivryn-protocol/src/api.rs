@@ -1,13 +1,15 @@
 //! REST request and response bodies. Routes live under `/api/v1`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::media::{CameraLimits, ScreenShareLimits};
 use chrono::{DateTime, Utc};
 
-use crate::model::{Category, Channel, ChannelKind, Guild, Message, MessageKind, NotifyLevel, User, UserStatus};
+use crate::model::{Category, Channel, ChannelKind, Guild, Message, MessageKind, NotifyLevel, Role, User, UserStatus};
 use crate::permissions::Permissions;
-use crate::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, UserId};
+use crate::{CategoryId, ChannelId, DeviceId, FileId, GuildId, MessageId, RoleId, UserId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorBody {
@@ -104,6 +106,13 @@ pub struct GuildWithChannels {
     /// Which messages here notify the requesting user.
     #[serde(default)]
     pub notify_level: NotifyLevel,
+    /// All roles, highest first (`@everyone` last).
+    #[serde(default)]
+    pub roles: Vec<Role>,
+    /// The requesting user's permissions per channel (after overwrites).
+    /// Channels they can't see aren't listed at all.
+    #[serde(default)]
+    pub channel_permissions: HashMap<ChannelId, Permissions>,
 }
 
 /// `GET /api/v1/guilds/{id}/members`
@@ -113,6 +122,9 @@ pub struct GuildMember {
     /// Name in this guild, overriding the display name.
     #[serde(default)]
     pub nick: Option<String>,
+    /// Roles besides `@everyone`.
+    #[serde(default)]
+    pub roles: Vec<RoleId>,
 }
 
 /// `PATCH /api/v1/guilds/{id}/members/@me`
@@ -287,6 +299,9 @@ pub struct VoiceChannelState {
 pub struct VoiceParticipant {
     pub user_id: UserId,
     pub muted: bool,
+    /// Turned off their sound in Sivryn.
+    #[serde(default)]
+    pub deafened: bool,
     pub camera: bool,
     pub screen_sharing: bool,
 }
@@ -419,6 +434,50 @@ mod double_option {
     pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
         Option::<T>::deserialize(d).map(Some)
     }
+}
+
+/// `POST /api/v1/guilds/{id}/roles` and `PATCH /api/v1/roles/{id}`
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RoleRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Permissions>,
+    /// `Some(None)` removes the color.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub color: Option<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hoist: Option<bool>,
+}
+
+/// `PUT /api/v1/guilds/{id}/roles/order`: roles from highest to lowest,
+/// without `@everyone`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoleOrderRequest {
+    pub roles: Vec<RoleId>,
+}
+
+/// `PUT /api/v1/guilds/{id}/layout`: the whole channel list after a drag.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayoutRequest {
+    /// Categories from top to bottom.
+    pub categories: Vec<CategoryId>,
+    /// Every channel with its category, in order within that category.
+    pub channels: Vec<ChannelPlacement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelPlacement {
+    pub id: ChannelId,
+    #[serde(default)]
+    pub category_id: Option<CategoryId>,
+}
+
+/// `POST /api/v1/guilds/{id}/voice/move`: moves someone to another voice channel.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MoveMemberRequest {
+    pub user_id: UserId,
+    pub channel_id: ChannelId,
 }
 
 /// `GET /api/v1/guilds/{id}/bans`

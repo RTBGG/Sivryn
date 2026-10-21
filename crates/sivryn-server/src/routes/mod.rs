@@ -12,6 +12,7 @@ mod guilds;
 mod instance;
 mod messages;
 mod mls;
+mod roles;
 pub(crate) mod users;
 pub(crate) mod voice;
 
@@ -68,6 +69,19 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
             put(guilds::set_icon).layer(DefaultBodyLimit::max(4 * 1024 * 1024 + UPLOAD_OVERHEAD)),
         )
         .route("/guilds/{guild_id}/members", get(guilds::members))
+        .route("/guilds/{guild_id}/roles", get(roles::list).post(roles::create))
+        .route("/guilds/{guild_id}/roles/order", put(roles::reorder))
+        .route("/roles/{role_id}", axum::routing::patch(roles::update).delete(roles::delete))
+        .route(
+            "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+            put(roles::add_member_role).delete(roles::remove_member_role),
+        )
+        .route("/channels/{channel_id}/overwrites", put(roles::set_channel_overwrite))
+        .route("/channels/{channel_id}/overwrites/{kind}/{target_id}", delete(roles::delete_channel_overwrite))
+        .route("/categories/{category_id}/overwrites", put(roles::set_category_overwrite))
+        .route("/categories/{category_id}/overwrites/{kind}/{target_id}", delete(roles::delete_category_overwrite))
+        .route("/guilds/{guild_id}/layout", put(roles::layout))
+        .route("/guilds/{guild_id}/voice/move", post(roles::move_member))
         .route("/guilds/{guild_id}/members/{user_id}", delete(guilds::remove_member))
         .route("/guilds/{guild_id}/bans", get(guilds::bans))
         .route("/guilds/{guild_id}/bans/{user_id}", put(guilds::ban).delete(guilds::unban))

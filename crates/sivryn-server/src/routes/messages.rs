@@ -130,9 +130,13 @@ pub async fn delete(
         .await?
         .ok_or(ApiError::NotFound)?;
     if author != auth.id.0 {
-        match channel.guild() {
-            Some(guild) => db::require(&state.db, guild, auth.id, Permissions::MANAGE_MESSAGES).await?,
-            None => return Err(ApiError::Forbidden),
+        // In guilds, per channel: overwrites can make someone a moderator of one channel.
+        let allowed = channel.guild().is_some()
+            && db::channel_permissions_of(&state.db, &channel, auth.id)
+                .await?
+                .is_some_and(|p| p.allows(Permissions::MANAGE_MESSAGES));
+        if !allowed {
+            return Err(ApiError::Forbidden);
         }
     }
     sqlx::query("DELETE FROM messages WHERE id = $1").bind(message_id.0).execute(&state.db).await?;

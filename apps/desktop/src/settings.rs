@@ -36,6 +36,11 @@ pub struct Settings {
     pub link_previews: bool,
     /// Folded channel categories.
     pub collapsed_categories: std::collections::HashSet<CategoryId>,
+    /// Ask before leaving one voice channel for another.
+    pub confirm_voice_switch: bool,
+    /// Widths of the channel list and of a voice channel's chat, in pixels.
+    pub sidebar_width: f64,
+    pub voice_chat_width: f64,
     pub video: VideoSettings,
     pub keybinds: Keybinds,
     pub appearance: Appearance,
@@ -55,6 +60,9 @@ impl Default for Settings {
             member_list: true,
             link_previews: true,
             collapsed_categories: Default::default(),
+            confirm_voice_switch: true,
+            sidebar_width: 252.0,
+            voice_chat_width: 380.0,
             video: VideoSettings::default(),
             keybinds: Keybinds::default(),
             appearance: Appearance::default(),

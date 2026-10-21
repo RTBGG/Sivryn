@@ -7,6 +7,7 @@ use sivryn_media::audio::{input_devices, output_devices};
 use sivryn_media::codec::HardwareEncoders;
 use sivryn_media::{CameraQuality, NoiseSuppression, VoiceMode, list_cameras, media_foundation_available};
 
+use super::guild_settings::GuildIcon;
 use super::icons::{Icon, Svg};
 use super::widgets::{Avatar, IconButton, RemoteImage, Segmented, Select, Slider, Toggle, opt};
 use super::{AppState, CapturedKey, Services, SettingsPage};
@@ -123,12 +124,19 @@ fn AccountPage() -> Element {
     let mut banner = use_signal(|| None::<sivryn_client_core::protocol::FileId>);
     let mut loaded = use_signal(|| false);
     let mut busy = use_signal(|| false);
-    // Description and banner come with the account settings.
-    use_hook(move || {
+    // Description and banner come with the account settings; a new banner
+    // (from the crop dialog) loads it again.
+    let mut first_load = use_signal(|| true);
+    use_effect(move || {
+        let _ = state.profile_rev.read();
         let Some(s) = state.session.cloned() else { return };
+        let first = *first_load.peek();
+        first_load.set(false);
         spawn(async move {
             if let Ok(me) = s.api.me_settings().await {
-                bio.set(me.bio);
+                if first {
+                    bio.set(me.bio);
+                }
                 banner.set(me.banner_id);
             }
             loaded.set(true);
@@ -153,33 +161,10 @@ fn AccountPage() -> Element {
             }
         });
     };
+    // Pick an image and crop it (avatars 256 px squares, banners 960×340).
     let pick_image = move |is_banner: bool| {
-        let Some(s) = state.session.cloned() else { return };
-        spawn_forever(async move {
-            let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title(if is_banner { t("profile.pick_banner") } else { t("profile.pick_avatar") })
-                .add_filter(t("profile.images"), &["png", "jpg", "jpeg", "gif", "webp"])
-                .pick_file()
-                .await
-            else {
-                return;
-            };
-            let bytes = file.read().await;
-            // Avatars become 256 px squares, banners 960×340; animated GIFs stay as they are.
-            let prepared = tokio::task::spawn_blocking(move || crate::files::profile_image(&bytes, is_banner))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r);
-            let result = match prepared {
-                Ok((mime, data)) => s.api.set_profile_image(is_banner, mime, data).await.map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            match result {
-                Ok(uploaded) if is_banner => banner.set(Some(uploaded.id)),
-                Ok(_) => {}
-                Err(e) => state.report(Err(e)),
-            }
-        });
+        let purpose = if is_banner { super::crop::CropPurpose::Banner } else { super::crop::CropPurpose::Avatar };
+        super::crop::pick(state, purpose);
     };
     let remove_image = move |is_banner: bool| {
         let Some(s) = state.session.cloned() else { return };
@@ -206,7 +191,7 @@ fn AccountPage() -> Element {
             div { class: "profile-preview",
                 div { class: "profile-banner",
                     for file in current_banner.iter() {
-                        RemoteImage { key: "{file}", file: *file, size: 800 }
+                        RemoteImage { key: "{file}", file: *file, size: 800, animate: true, cover: true }
                     }
                 }
                 div { class: "profile-preview-body",
@@ -256,9 +241,7 @@ fn AccountPage() -> Element {
             div { class: "divider" }
             h2 { class: "subsection", {t("profile.server_names")} }
             p { class: "muted small lead-tight", {t("profile.server_names_hint")} }
-            for (gid, gname, nick) in guilds {
-                ServerNameRow { key: "{gid}", guild: gid, guild_name: gname, nick, placeholder: name.clone() }
-            }
+            ServerNames { placeholder: name.clone() }
         }
         div { class: "divider" }
         div { class: "info-grid",
@@ -282,9 +265,55 @@ fn AccountPage() -> Element {
     }
 }
 
+/// Pick a server (with its icon), then set your name there.
+#[component]
+fn ServerNames(placeholder: String) -> Element {
+    let state = use_context::<AppState>();
+    let guilds: Vec<(GuildId, String, Option<sivryn_client_core::protocol::FileId>, String)> = state
+        .guilds
+        .read()
+        .iter()
+        .map(|g| (g.guild.id, g.guild.name.clone(), g.guild.icon_id, g.nick.clone().unwrap_or_default()))
+        .collect();
+    let mut selected = use_signal(|| None::<GuildId>);
+    let mut open = use_signal(|| false);
+    let current =
+        selected.read().and_then(|id| guilds.iter().find(|g| g.0 == id).cloned()).or_else(|| guilds.first().cloned());
+    let Some((gid, gname, icon, nick)) = current else { return rsx! {} };
+    rsx! {
+        div { class: "guild-picker",
+            div { class: if *open.read() { "select-button open" } else { "select-button" }, onclick: move |_| open.toggle(),
+                div { class: "guild-picker-icon", GuildIcon { name: gname.clone(), icon, size: 24 } }
+                span { class: "select-value", "{gname}" }
+                Svg { icon: Icon::ChevronDown, size: 16 }
+            }
+            if *open.read() {
+                div { class: "select-menu",
+                    for (id, name, icon, _) in guilds.iter().cloned() {
+                        div {
+                            key: "{id}",
+                            class: if id == gid { "select-option guild-option selected" } else { "select-option guild-option" },
+                            onclick: move |_| {
+                                selected.set(Some(id));
+                                open.set(false);
+                            },
+                            div { class: "guild-picker-icon", GuildIcon { name: name.clone(), icon, size: 24 } }
+                            span { "{name}" }
+                        }
+                    }
+                }
+            }
+        }
+        // Keyed by server, so switching starts with that server's name.
+        for g in [gid] {
+            ServerNameRow { key: "{g}", guild: g, nick: nick.clone(), placeholder: placeholder.clone() }
+        }
+    }
+}
+
 /// Your name in one server.
 #[component]
-fn ServerNameRow(guild: GuildId, guild_name: String, nick: String, placeholder: String) -> Element {
+fn ServerNameRow(guild: GuildId, nick: String, placeholder: String) -> Element {
     let state = use_context::<AppState>();
     let mut value = use_signal(move || nick);
     let mut saved = use_signal(|| false);
@@ -301,7 +330,6 @@ fn ServerNameRow(guild: GuildId, guild_name: String, nick: String, placeholder: 
     };
     rsx! {
         div { class: "server-name-row",
-            span { class: "server-name-label", "{guild_name}" }
             input {
                 class: "input",
                 value: "{value}",
@@ -852,6 +880,8 @@ fn AboutPage() -> Element {
             div { {yes_no(media_foundation_available())} }
         }
         p { class: "muted", {t("about.links")} }
-        p { class: "mono muted", "github.com/RTBGG/Sivryn" }
+        p {
+            span { class: "link mono", onclick: move |_| crate::files::open_link("https://github.com/RTBGG/Sivryn"), "github.com/RTBGG/Sivryn" }
+        }
     }
 }

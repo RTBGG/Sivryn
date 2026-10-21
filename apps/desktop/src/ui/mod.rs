@@ -14,9 +14,11 @@ use sivryn_client_core::protocol::api::{
     DmChannel, FriendsResponse, GuildMember, GuildWithChannels, MessageQuery, VoiceJoinResponse, VoiceParticipant,
 };
 use sivryn_client_core::protocol::gateway::{Event, ServerMessage};
-use sivryn_client_core::protocol::model::{Channel, ChannelKind, Guild, MessageKind, NotifyLevel, User, UserStatus};
+use sivryn_client_core::protocol::model::{
+    Channel, ChannelKind, Guild, MessageKind, NotifyLevel, Role, User, UserStatus,
+};
 use sivryn_client_core::protocol::permissions::Permissions;
-use sivryn_client_core::protocol::{CategoryId, ChannelId, FileId, GuildId, MessageId, UserId};
+use sivryn_client_core::protocol::{CategoryId, ChannelId, FileId, GuildId, MessageId, RoleId, UserId};
 use sivryn_media::{AudioEngine, CameraShare, RgbaFrame, ScreenAudio, ScreenShare, Sound, VideoFeed, VoiceCall};
 use tokio::sync::watch;
 
@@ -31,7 +33,10 @@ use crate::settings::{Settings, Theme};
 mod call;
 mod channels;
 mod chat_view;
+mod crop;
+mod dnd;
 mod emoji_picker;
+mod fullscreen;
 mod guild_settings;
 mod home;
 pub mod icons;
@@ -39,7 +44,10 @@ mod login;
 mod media;
 mod members;
 mod menu;
+mod place_settings;
 mod profile;
+mod resize;
+mod roles;
 mod settings_view;
 mod shell;
 pub mod widgets;
@@ -64,6 +72,8 @@ pub struct Participant {
     pub identity: String,
     pub name: String,
     pub muted: bool,
+    /// Turned off their sound.
+    pub deafened: bool,
     pub sharing: bool,
 }
 
@@ -112,6 +122,10 @@ pub enum Modal {
     Category(GuildId, Option<CategoryId>),
     ChannelSettings(ChannelId),
     NotifySettings(GuildId),
+    /// "Leave the current voice channel for this one?"
+    SwitchVoice(ChannelId),
+    /// "Join this voice channel?" (from a mention in the chat).
+    JoinVoice(ChannelId),
     Profile(UserId),
 }
 
@@ -150,6 +164,8 @@ pub struct Composer {
     pub files: Vec<PendingFile>,
     /// Uploading and sending; the box keeps showing the files meanwhile.
     pub sending: bool,
+    /// Mentions picked from the suggestions: the `@Name` shown, the token sent.
+    pub mentions: Vec<crate::mentions::Picked>,
 }
 
 /// An image shown full size over everything else.
@@ -176,9 +192,11 @@ impl PartialEq for ViewerImage {
 /// Set while an overlay is open that Escape closes.
 static ESCAPABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Closes the image viewer, a menu, a dialog or the settings, in that order.
+/// Closes fullscreen, the image viewer, a menu, a dialog or the settings, in that order.
 fn close_topmost(mut state: AppState) {
-    if state.viewer.peek().is_some() {
+    if state.full_view.peek().is_some() {
+        fullscreen::close(state);
+    } else if state.viewer.peek().is_some() {
         state.viewer.set(None);
     } else if state.menu.peek().is_some() {
         state.menu.set(None);
@@ -243,6 +261,18 @@ pub struct AppState {
     pub voice_chat: Signal<bool>,
     pub voice: Signal<HashMap<ChannelId, Vec<VoiceParticipant>>>,
     pub call: Signal<Option<CallState>>,
+    /// The voice channel being connected to.
+    pub connecting: Signal<Option<ChannelId>>,
+    /// A channel, category or voice member being dragged.
+    pub drag: Signal<Option<dnd::Drag>>,
+    /// The video that has a player (only one at a time, to save memory).
+    pub active_video: Signal<u64>,
+    /// A video or stream shown over the whole screen.
+    pub full_view: Signal<Option<fullscreen::FullView>>,
+    /// A picked image being cropped (avatar, banner, server icon).
+    pub crop: Signal<Option<crop::CropRequest>>,
+    /// Bumped when the own profile images changed, so editors reload them.
+    pub profile_rev: Signal<u32>,
     /// An incoming DM or group call: channel and caller.
     pub ringing: Signal<Option<(ChannelId, UserId)>>,
     pub muted: Signal<bool>,
@@ -295,6 +325,17 @@ impl AppState {
     /// The name to show in a guild: the member's name there, else their own.
     pub fn display_name_in(&self, guild: Option<GuildId>, id: UserId) -> String {
         guild.and_then(|g| self.nicks.read().get(&(g, id)).cloned()).unwrap_or_else(|| self.username(id))
+    }
+
+    /// How a mention reads: `@Name` (the name in the guild) or `#channel`.
+    pub fn mention_label(&self, guild: Option<GuildId>, token: crate::mentions::Token) -> String {
+        match token {
+            crate::mentions::Token::User(id) => format!("@{}", self.display_name_in(guild, id)),
+            crate::mentions::Token::Channel(id) => match self.find_channel(id) {
+                Some(c) => format!("#{}", c.name),
+                None => format!("#{}", t("chat.unknown_channel")),
+            },
+        }
     }
 
     /// Remembers a user's name and picture.
@@ -421,6 +462,62 @@ impl AppState {
     /// My permissions in a guild (none outside guilds).
     pub fn permissions(&self, guild: GuildId) -> Permissions {
         self.guilds.read().iter().find(|g| g.guild.id == guild).map(|g| g.permissions).unwrap_or(Permissions::empty())
+    }
+
+    /// My permissions in one channel (after its overwrites). DMs and groups
+    /// allow everything except managing.
+    pub fn channel_permissions(&self, channel: ChannelId) -> Permissions {
+        let guilds = self.guilds.read();
+        match guilds.iter().find(|g| g.channels.iter().any(|c| c.id == channel)) {
+            Some(g) => g.channel_permissions.get(&channel).copied().unwrap_or(g.permissions),
+            None => {
+                Permissions::VIEW_CHANNEL
+                    | Permissions::SEND_MESSAGES
+                    | Permissions::ATTACH_FILES
+                    | Permissions::CONNECT
+                    | Permissions::SPEAK
+                    | Permissions::VIDEO
+                    | Permissions::SCREEN_SHARE
+            }
+        }
+    }
+
+    /// A guild's roles, highest first (`@everyone` last).
+    pub fn roles(&self, guild: GuildId) -> Vec<Role> {
+        self.guilds.read().iter().find(|g| g.guild.id == guild).map(|g| g.roles.clone()).unwrap_or_default()
+    }
+
+    /// The roles a member has (besides `@everyone`).
+    pub fn member_roles(&self, guild: GuildId, user: UserId) -> Vec<RoleId> {
+        self.members
+            .read()
+            .get(&guild)
+            .and_then(|l| l.iter().find(|m| m.user.id == user).map(|m| m.roles.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The color of a member's highest colored role.
+    pub fn role_color(&self, guild: Option<GuildId>, user: UserId) -> Option<u32> {
+        let guild = guild?;
+        let mine = self.member_roles(guild, user);
+        self.roles(guild).into_iter().filter(|r| mine.contains(&r.id)).find_map(|r| r.color)
+    }
+
+    pub fn is_owner(&self, guild: GuildId, user: UserId) -> bool {
+        self.guild(guild).is_some_and(|g| g.owner_id == user)
+    }
+
+    /// Position of a member's highest role (0 with only `@everyone`).
+    pub fn top_position(&self, guild: GuildId, user: UserId) -> i32 {
+        let mine = self.member_roles(guild, user);
+        self.roles(guild).iter().filter(|r| mine.contains(&r.id)).map(|r| r.position).max().unwrap_or(0)
+    }
+
+    /// Whether I may manage a role at `position` (or a member whose highest
+    /// role is there): only below my own highest role, unless I own the guild.
+    pub fn outranks(&self, guild: GuildId, position: i32) -> bool {
+        let Some(me) = self.me() else { return false };
+        self.is_owner(guild, me) || self.top_position(guild, me) > position
     }
 
     /// Changes settings, applies them and saves them to disk.
@@ -655,6 +752,9 @@ impl AppState {
             let level =
                 self.guilds.peek().iter().find(|g| g.guild.id == guild).map(|g| g.notify_level).unwrap_or_default();
             let mentioned = || {
+                if body.contains(&crate::mentions::Token::User(s.user.id).encode()) {
+                    return true;
+                }
                 let lower = body.to_lowercase();
                 let mut names = vec![s.user.username.clone(), self.username(s.user.id)];
                 names.extend(self.nicks.peek().get(&(guild, s.user.id)).cloned());
@@ -676,7 +776,7 @@ impl AppState {
         };
         let attachments = record.content.as_ref().map(|c| c.attachments.len()).unwrap_or(0);
         let text = if !body.is_empty() {
-            body.chars().take(200).collect::<String>()
+            crate::mentions::plain(&body, |t| self.mention_label(guild, t)).chars().take(200).collect::<String>()
         } else if attachments > 0 {
             format!("📎 {attachments} {}", t("notify.files"))
         } else {
@@ -781,8 +881,23 @@ impl AppState {
             Event::MemberJoin { guild_id, user } => {
                 self.report(self.refresh().await);
                 if user.id != s.user.id {
+                    // Only channels they may read: private ones stay closed.
                     for channel in self.guild_group_channels(s, guild_id) {
-                        self.report(chat::add_user(s, channel, user.id).await);
+                        self.report(chat::sync_members(s, channel).await);
+                    }
+                }
+            }
+            Event::ChannelAccessChanged { guild_id } => {
+                // The guild was reloaded by the GuildUpdate sent just before.
+                for channel in self.guild_group_channels(s, guild_id) {
+                    self.report(chat::sync_members(s, channel).await);
+                }
+            }
+            Event::VoiceMove { channel_id } => {
+                if self.call.peek().as_ref().is_some_and(|c| c.channel != channel_id) {
+                    call::start(self, channel_id, false);
+                    if *self.channel.peek() == self.call.peek().as_ref().map(|c| c.channel) {
+                        self.open_channel(channel_id);
                     }
                 }
             }
@@ -983,6 +1098,17 @@ impl AppState {
         self.deafened.set(deafened);
         use_services_engine().set_deafened(deafened);
         self.apply_mute();
+        if let Some(call) = self.call.peek().as_ref()
+            && let Some(vc) = call.call.borrow().as_ref()
+        {
+            vc.set_deafened(deafened);
+        }
+        if let Some(c) = self.call.write().as_mut() {
+            let me = c.identity.clone();
+            if let Some(p) = c.participants.iter_mut().find(|p| p.identity == me) {
+                p.deafened = deafened;
+            }
+        }
         use_services_engine().play(if deafened { Sound::Deafen } else { Sound::Undeafen });
     }
 
@@ -1090,6 +1216,12 @@ pub fn App() -> Element {
             voice_chat: root(false),
             voice: root(HashMap::new()),
             call: root(None),
+            connecting: root(None),
+            drag: root(None),
+            crop: root(None),
+            active_video: root(0),
+            full_view: root(None),
+            profile_rev: root(0),
             ringing: root(None),
             muted: root(false),
             deafened: root(false),
@@ -1220,7 +1352,8 @@ pub fn App() -> Element {
 
     // Whether Escape has something to close (read by the window's key handler).
     use_effect(move || {
-        let open = state.viewer.read().is_some()
+        let open = state.full_view.read().is_some()
+            || state.viewer.read().is_some()
             || state.menu.read().is_some()
             || state.modal.read().is_some()
             || state.settings_page.read().is_some();
@@ -1271,6 +1404,9 @@ pub fn App() -> Element {
             // Overlays come last so they paint on top of everything.
             if state.viewer.read().is_some() {
                 media::ImageViewer {}
+            }
+            if state.full_view.read().is_some() {
+                fullscreen::FullscreenView {}
             }
             if state.ringing.read().is_some() {
                 call::IncomingCall {}

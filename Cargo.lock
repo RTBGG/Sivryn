@@ -8343,6 +8343,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "keyring",
+ "naga 26.0.0",
  "reqwest 0.13.5",
  "rfd",
  "rusqlite",

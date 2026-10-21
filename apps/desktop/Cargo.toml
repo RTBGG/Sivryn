@@ -58,3 +58,5 @@ winresource = "0.1.34"
 
 [dev-dependencies]
 rustls.workspace = true
+# Validates the video shader (already in the tree through wgpu).
+naga = { version = "26", features = ["wgsl-in"] }

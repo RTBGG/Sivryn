@@ -35,14 +35,27 @@ pub struct MediaPlayer {
 impl MediaPlayer {
     /// Starts decoding `data` (an MP4, MOV, WebM, MP3 … file) and plays it.
     pub fn open(data: Arc<Vec<u8>>, engine: AudioEngine) -> Result<Self, MediaError> {
+        Self::open_at(data, engine, None)
+    }
+
+    /// Opens `data` paused at `ms`, showing the picture there (seeking a
+    /// video that wasn't played yet).
+    pub fn open_paused(data: Arc<Vec<u8>>, engine: AudioEngine, ms: u64) -> Result<Self, MediaError> {
+        Self::open_at(data, engine, Some(ms))
+    }
+
+    fn open_at(data: Arc<Vec<u8>>, engine: AudioEngine, paused_at: Option<u64>) -> Result<Self, MediaError> {
         if !crate::media_foundation_available() {
             return Err(MediaError::NoMediaFoundation);
         }
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let audio_key = format!("player:{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let audio_key = format!("{}{}", crate::audio::LOCAL_PREFIX, NEXT.fetch_add(1, Ordering::Relaxed));
         let audio = engine.add_local_stream(&audio_key);
         let shared = Arc::new(Shared::default());
-        shared.playing.store(true, Ordering::Relaxed);
+        shared.playing.store(paused_at.is_none(), Ordering::Relaxed);
+        if let Some(ms) = paused_at {
+            *shared.seek_to.lock().unwrap_or_else(|e| e.into_inner()) = Some(ms);
+        }
         let (tx, frames) = watch::channel(None);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let thread_shared = shared.clone();
@@ -100,6 +113,28 @@ impl MediaPlayer {
 
     pub fn duration_ms(&self) -> u64 {
         self.shared.duration_ms.load(Ordering::Relaxed)
+    }
+
+    /// Playback volume, 0.0–2.0.
+    pub fn set_volume(&self, volume: f32) {
+        self.engine.set_volume(&self.audio_key, volume);
+    }
+}
+
+/// The first picture of a video and its length in milliseconds, for the
+/// poster a sender attaches. `None` if it has no video or can't be read.
+pub fn video_poster(data: &[u8]) -> Option<(RgbaFrame, u64)> {
+    #[cfg(windows)]
+    {
+        if !crate::media_foundation_available() {
+            return None;
+        }
+        imp::first_frame(data)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data;
+        None
     }
 }
 
@@ -282,6 +317,40 @@ mod imp {
         }
     }
 
+    /// Decodes the first video frame (see [`super::video_poster`]).
+    pub(super) fn first_frame(data: &[u8]) -> Option<(RgbaFrame, u64)> {
+        // SAFETY: balanced below.
+        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        // SAFETY: balanced with MFShutdown below.
+        let mf = unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) };
+        let result = (|| {
+            let (reader, has_video, has_audio) = open_reader(data).ok()?;
+            if !has_video {
+                return None;
+            }
+            let format = read_format(&reader, has_video, has_audio);
+            let duration = duration_ms(&reader);
+            // Some files start with an empty sample or two.
+            for _ in 0..30 {
+                let mut flags = 0u32;
+                let mut sample = None;
+                // SAFETY: synchronous read with out parameters.
+                unsafe { reader.ReadSample(VIDEO, 0, None, Some(&mut flags), None, Some(&mut sample)) }.ok()?;
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    return None;
+                }
+                if let Some(sample) = sample
+                    && let Some(bytes) = sample_bytes(&sample)
+                {
+                    return to_rgba(&bytes, format.width, format.height).map(|f| (f, duration));
+                }
+            }
+            None
+        })();
+        cleanup(com.is_ok(), mf.is_ok());
+        result
+    }
+
     pub(super) fn run(
         data: Arc<Vec<u8>>,
         shared: Arc<Shared>,
@@ -312,6 +381,8 @@ mod imp {
         // Playback clock: media time `base_pts` happened at `base_instant`.
         let mut clock: Option<(Instant, i64)> = None;
         let mut paused_at: Option<i64> = None;
+        // A seek while paused shows the picture at the new position.
+        let mut show_still = false;
         // A file ends once every stream it has reported its end.
         let (mut video_done, mut audio_done) = (!has_video, !has_audio);
         loop {
@@ -325,11 +396,45 @@ mod imp {
                 paused_at = None;
                 (video_done, audio_done) = (!has_video, !has_audio);
                 shared.position_ms.store(ms, Ordering::Relaxed);
+                show_still = has_video;
             }
-            if !shared.playing.load(Ordering::Relaxed) || shared.ended.load(Ordering::Relaxed) {
-                // Freeze the clock while paused.
+            let paused = !shared.playing.load(Ordering::Relaxed) || shared.ended.load(Ordering::Relaxed);
+            if paused && show_still {
+                show_still = false;
+                // The first frame from here, without moving the clock on.
+                for _ in 0..30 {
+                    let mut flags = 0u32;
+                    let mut pts = 0i64;
+                    let mut sample = None;
+                    // SAFETY: synchronous read with out parameters.
+                    let read = unsafe {
+                        reader.ReadSample(VIDEO, 0, None, Some(&mut flags), Some(&mut pts), Some(&mut sample))
+                    };
+                    if read.is_err() || flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                        break;
+                    }
+                    if let Some(sample) = sample
+                        && let Some(bytes) = sample_bytes(&sample)
+                        && let Some(frame) = to_rgba(&bytes, format.width, format.height)
+                    {
+                        let _ = frames.send(Some(Arc::new(frame)));
+                        shared.position_ms.store((pts / 10_000).max(0) as u64, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                // Playing on starts from that picture.
+                let position = shared.position_ms.load(Ordering::Relaxed);
+                seek(&reader, position);
+                audio.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                (video_done, audio_done) = (!has_video, !has_audio);
+                continue;
+            }
+            if paused {
+                // Freeze the clock while paused, and stop the sound right
+                // away instead of letting the queued part play out.
                 if let Some((start, base)) = clock.take() {
                     paused_at = Some(base + start.elapsed().as_millis() as i64 * 10_000);
+                    audio.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 }
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
@@ -366,6 +471,7 @@ mod imp {
             let due = start + Duration::from_micros(((pts - base - lead).max(0) / 10) as u64);
             while Instant::now() < due {
                 if shared.stop.load(Ordering::Relaxed)
+                    || !shared.playing.load(Ordering::Relaxed)
                     || shared.seek_to.lock().unwrap_or_else(|e| e.into_inner()).is_some()
                 {
                     break;
@@ -416,6 +522,54 @@ mod imp {
             let bytes = [1, 2, 3, 0, 4, 5, 6, 0, 9, 9, 9, 9];
             let f = to_rgba(&bytes, 2, 1).unwrap();
             assert_eq!(f.data, [3, 2, 1, 255, 6, 5, 4, 255]);
+        }
+
+        #[test]
+        fn decodes_audio_into_the_buffer() {
+            let path = std::env::var("SIVRYN_TEST_MEDIA").unwrap_or(r"C:\Windows\Media\Alarm01.wav".into());
+            let Ok(data) = std::fs::read(&path) else { return };
+            let shared = Arc::new(Shared::default());
+            shared.playing.store(true, Ordering::Relaxed);
+            let (tx, _rx) = watch::channel(None);
+            let audio = Arc::new(Mutex::new(VecDeque::new()));
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (s2, a2) = (shared.clone(), audio.clone());
+            let t = std::thread::spawn(move || run(Arc::new(data), s2, tx, a2, ready_tx));
+            assert!(ready_rx.recv().unwrap().is_ok());
+            std::thread::sleep(Duration::from_millis(600));
+            shared.stop.store(true, Ordering::Relaxed);
+            t.join().unwrap();
+            let n = audio.lock().unwrap().len();
+            eprintln!("audio samples: {n}, duration {} ms", shared.duration_ms.load(Ordering::Relaxed));
+            assert!(n > 10_000, "only {n} samples");
+        }
+
+        #[test]
+        fn posters_come_from_the_first_frame() {
+            let Ok(path) = std::env::var("SIVRYN_TEST_VIDEO") else { return };
+            let data = std::fs::read(path).unwrap();
+            let (frame, duration) = super::super::video_poster(&data).expect("poster");
+            assert!(frame.width > 0 && frame.height > 0 && duration > 0);
+            assert!(super::super::video_poster(b"not a video").is_none());
+        }
+
+        #[test]
+        fn plays_video_frames() {
+            let Ok(path) = std::env::var("SIVRYN_TEST_VIDEO") else { return };
+            let data = Arc::new(std::fs::read(path).unwrap());
+            let engine = crate::AudioEngine::new(Default::default());
+            for round in 0..2 {
+                let started = std::time::Instant::now();
+                let player = super::super::MediaPlayer::open(data.clone(), engine.clone()).expect("opens");
+                eprintln!("round {round}: opened in {:?}", started.elapsed());
+                let mut frames = player.frames.clone();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while frames.borrow().is_none() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert!(frames.borrow_and_update().is_some(), "no frame in round {round}");
+                eprintln!("round {round}: first frame after {:?}", started.elapsed());
+            }
         }
 
         #[test]

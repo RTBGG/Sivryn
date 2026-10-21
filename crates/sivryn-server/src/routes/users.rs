@@ -315,6 +315,7 @@ pub async fn remove_banner(State(state): State<AppState>, auth: AuthUser) -> Api
 /// Unread counts for every channel the user can read. Without a read state,
 /// messages since joining count.
 pub async fn read_states(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<ReadState>>> {
+    let hidden = hidden_channels(&state, auth.id).await?;
     let rows: Vec<(Uuid, Option<Uuid>, i32)> = sqlx::query_as(
         "WITH visible AS (
              SELECT c.id, m.joined_at AS since FROM channels c
@@ -339,6 +340,7 @@ pub async fn read_states(State(state): State<AppState>, auth: AuthUser) -> ApiRe
     .await?;
     Ok(Json(
         rows.into_iter()
+            .filter(|(channel, _, _)| !hidden.contains(channel))
             .map(|(channel, last, unread)| ReadState {
                 channel_id: ChannelId(channel),
                 last_read_id: last.map(MessageId),
@@ -346,6 +348,27 @@ pub async fn read_states(State(state): State<AppState>, auth: AuthUser) -> ApiRe
             })
             .collect(),
     ))
+}
+
+/// Guild channels of `user`'s guilds that overwrites hide from them.
+async fn hidden_channels(state: &AppState, user: UserId) -> ApiResult<Vec<Uuid>> {
+    let mut hidden = Vec::new();
+    for guild in db::user_guilds(&state.db, user).await? {
+        let overwrites = db::guild_overwrites(&state.db, guild.id).await?;
+        if overwrites.channels.is_empty() && overwrites.categories.is_empty() {
+            continue;
+        }
+        let Some(member) = db::membership(&state.db, guild.id, user).await? else { continue };
+        let channels: Vec<db::ChannelRow> =
+            sqlx::query_as("SELECT * FROM channels WHERE guild_id = $1").bind(guild.id.0).fetch_all(&state.db).await?;
+        hidden.extend(
+            channels
+                .iter()
+                .filter(|c| !member.in_channel(user, &overwrites, c).allows(Permissions::VIEW_CHANNEL))
+                .map(|c| c.id),
+        );
+    }
+    Ok(hidden)
 }
 
 /// `PUT /channels/{id}/read`: marks the channel read up to a message.

@@ -22,16 +22,29 @@ const MAX_ORIGINAL_BYTES: usize = 8 * 1024 * 1024;
 /// Larger images are scaled down to this edge before uploading.
 const LARGE_IMAGE_EDGE: u32 = 4096;
 
-/// A piece of message text: plain text or a link.
+/// A piece of message text: plain text, a link or a mention.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment<'a> {
     Text(&'a str),
     Link(&'a str),
+    Mention(crate::mentions::Token),
+}
+
+/// Splits text into plain parts, mentions and http(s) links.
+pub fn segments(text: &str) -> Vec<Segment<'_>> {
+    let mut out = Vec::new();
+    for piece in crate::mentions::split(text) {
+        match piece {
+            Ok(text) => out.extend(link_segments(text)),
+            Err(token) => out.push(Segment::Mention(token)),
+        }
+    }
+    out
 }
 
 /// Splits text into plain parts and http(s) links. Trailing punctuation that
 /// usually ends a sentence isn't part of the link.
-pub fn segments(text: &str) -> Vec<Segment<'_>> {
+fn link_segments(text: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(start) = find_link_start(rest) {
@@ -77,7 +90,7 @@ fn find_link_start(text: &str) -> Option<usize> {
 pub fn first_link(text: &str) -> Option<&str> {
     segments(text).into_iter().find_map(|s| match s {
         Segment::Link(url) => Some(url),
-        Segment::Text(_) => None,
+        _ => None,
     })
 }
 

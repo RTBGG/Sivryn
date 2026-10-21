@@ -58,11 +58,23 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 self.doc_mut().set_hover_to(dom_x, dom_y);
                 hover_node_id = self.doc().hover_node_id;
             }
-            UiEvent::MouseDown(_) => {
+            // Sivryn patch: hit-test again on press and release. The hover node
+            // was only updated by moves, so after the layout changed under a
+            // still pointer (a call tile moved, a frame appeared) the click
+            // went to a stale or removed node and was lost.
+            UiEvent::MouseDown(event) => {
+                let dom_x = event.x + viewport_scroll.x as f32 / zoom;
+                let dom_y = event.y + viewport_scroll.y as f32 / zoom;
+                self.doc_mut().set_hover_to(dom_x, dom_y);
+                hover_node_id = self.doc().hover_node_id;
                 self.doc_mut().active_node();
                 self.doc_mut().set_mousedown_node_id(hover_node_id);
             }
-            UiEvent::MouseUp(_) => {
+            UiEvent::MouseUp(event) => {
+                let dom_x = event.x + viewport_scroll.x as f32 / zoom;
+                let dom_y = event.y + viewport_scroll.y as f32 / zoom;
+                self.doc_mut().set_hover_to(dom_x, dom_y);
+                hover_node_id = self.doc().hover_node_id;
                 self.doc_mut().unactive_node();
             }
             _ => {}

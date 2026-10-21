@@ -41,8 +41,17 @@ impl PartialEq for Frames {
 
 /// Paints frames from a watch channel through the GPU, letterboxed.
 #[component]
-pub fn FrameCanvas(frames: Frames, #[props(default)] class: String) -> Element {
-    let source = use_wgpu(move || VideoSurface::new(frames.0.clone()));
+pub fn FrameCanvas(
+    frames: Frames,
+    #[props(default)] class: String,
+    /// Fill the canvas, cropping the overflow, instead of letterboxing.
+    #[props(default)]
+    cover: bool,
+) -> Element {
+    let source = use_wgpu(move || {
+        let surface = VideoSurface::new(frames.0.clone());
+        if cover { surface.cover() } else { surface }
+    });
     rsx! { canvas { class: "frame-canvas {class}", "src": "{source}" } }
 }
 
@@ -245,20 +254,87 @@ pub fn ImageViewer() -> Element {
     }
 }
 
-/// A video (or audio) attachment, played inline on demand.
+/// Loudness is perceived roughly logarithmically: the slider's position
+/// cubed gives an even feel from quiet to loud (and 0 is silence).
+pub(super) fn gain(volume: f32) -> f32 {
+    volume.clamp(0.0, 1.0).powi(3)
+}
+
+thread_local! {
+    /// The volume last set on any video, for the next one.
+    static LAST_VOLUME: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// The volume last set on any video.
+pub(super) fn remembered_volume() -> f32 {
+    LAST_VOLUME.with(|v| v.get())
+}
+
+pub(super) fn remember_volume(volume: f32) {
+    LAST_VOLUME.with(|v| v.set(volume));
+}
+
+/// Height of the controls over a chat video.
+const OVERLAY_HEIGHT: u32 = 52;
+
+static NEXT_VIDEO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A video (or audio) attachment, played inline on demand. Only one video
+/// has a player at a time: starting another frees this one's decoder and
+/// memory, and it resumes where it was when played again.
 #[component]
 pub fn VideoAttachment(attachment: Attachment) -> Element {
-    let state = use_context::<AppState>();
+    let mut state = use_context::<AppState>();
     let services = use_context::<Services>();
+    let id = use_hook(|| NEXT_VIDEO.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut player = use_signal(|| None::<Rc<MediaPlayer>>);
     let mut loading = use_signal(|| false);
-    let mut progress = use_signal(|| (0u64, 0u64, false));
+    // Download progress in percent while the file comes from the server.
+    let mut downloaded = use_signal(|| None::<u8>);
+    let mut progress = use_signal(|| (0u64, attachment.duration_ms.unwrap_or(0), false));
+    // While the timeline is dragged: the thumb follows the pointer, not the player.
+    let mut scrub = use_signal(|| None::<f32>);
+    let mut resume_at = use_signal(|| 0u64);
+    let mut volume = use_signal(remembered_volume);
+    // Fullscreen was asked for before the video was loaded.
+    let mut want_full = use_signal(|| false);
+    // The controls lie over the picture and hide while the mouse rests on
+    // it, or is elsewhere.
+    let (hovered, mut mark) = super::widgets::use_hover();
+    let (active, mut kick) = super::fullscreen::use_activity();
     let is_audio = attachment.mime.starts_with("audio/");
+    // The sender's poster, until the video itself shows.
+    let poster = use_hook({
+        let attachment = attachment.clone();
+        move || files::thumbnail(&attachment).map(|f| tokio::sync::watch::channel(Some(f)).1)
+    });
+
+    // Back from fullscreen, where the volume may have changed.
+    use_effect(move || {
+        if state.full_view.read().is_none() && *volume.peek() != remembered_volume() {
+            volume.set(remembered_volume());
+        }
+    });
+
+    // Another video took over: let go of the player.
+    use_effect(move || {
+        let active = *state.active_video.read();
+        if active != id && player.peek().is_some() {
+            if let Some(p) = player.peek().as_ref() {
+                resume_at.set(p.position_ms());
+            }
+            player.set(None);
+            progress.write().2 = false;
+        }
+    });
 
     // Progress polling while a player exists.
     use_future(move || async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if scrub.peek().is_some() {
+                continue;
+            }
             let now = player.peek().as_ref().map(|p| (p.position_ms(), p.duration_ms(), p.is_playing()));
             if let Some(now) = now
                 && *progress.peek() != now
@@ -268,36 +344,80 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
         }
     });
 
-    let start = {
+    // Loads the file and opens a player: playing (from where it was left),
+    // or paused at `still` to show the picture there.
+    let open = {
         let attachment = attachment.clone();
         let engine = services.engine.clone();
-        move |_| {
-            if let Some(p) = player.peek().as_ref() {
-                p.set_playing(!p.is_playing());
-                return;
-            }
+        move |still: Option<u64>| {
             let Some(s) = state.session.cloned() else { return };
             if *loading.peek() {
                 return;
             }
             loading.set(true);
+            state.active_video.set(id);
             let attachment = attachment.clone();
             let engine = engine.clone();
+            let resume = *resume_at.peek();
             spawn(async move {
-                let result = match files::fetch(&s, &attachment).await {
-                    Ok(bytes) => MediaPlayer::open(bytes, engine).map_err(|e| e.to_string()),
+                let fetched = files::fetch_with_progress(&s, &attachment, |got, total| {
+                    let total = total.unwrap_or(attachment.size).max(1);
+                    let pct = (got.saturating_mul(100) / total).min(99) as u8;
+                    if *downloaded.peek() != Some(pct) {
+                        downloaded.set(Some(pct));
+                    }
+                })
+                .await;
+                downloaded.set(None);
+                let result = match fetched {
+                    Ok(bytes) => match still {
+                        Some(ms) => MediaPlayer::open_paused(bytes, engine, ms),
+                        None => MediaPlayer::open(bytes, engine),
+                    }
+                    .map_err(|e| e.to_string()),
                     Err(e) => Err(e),
                 };
                 loading.set(false);
                 match result {
-                    Ok(p) => player.set(Some(Rc::new(p))),
+                    Ok(p) => {
+                        p.set_volume(gain(*volume.peek()));
+                        if still.is_none() && resume > 0 {
+                            p.seek(resume);
+                        }
+                        progress.write().2 = still.is_none();
+                        let p = Rc::new(p);
+                        player.set(Some(p.clone()));
+                        if *want_full.peek() {
+                            want_full.set(false);
+                            super::fullscreen::open(state, super::fullscreen::FullView::Video(p));
+                        }
+                    }
                     Err(e) => state.report(Err(e)),
                 }
             });
         }
     };
+
+    let start = {
+        let mut open = open.clone();
+        move |_| {
+            if let Some(p) = player.peek().as_ref() {
+                let play = !p.is_playing();
+                p.set_playing(play);
+                // Show the new state right away, not at the next poll.
+                progress.write().2 = play;
+                if play {
+                    state.active_video.set(id);
+                }
+                return;
+            }
+            open(None);
+        }
+    };
     let (pos, dur, playing) = *progress.read();
-    let pct = if dur > 0 { (pos as f64 / dur as f64 * 100.0).min(100.0) } else { 0.0 };
+    let shown = scrub.read().unwrap_or(if dur > 0 { pos as f32 / dur as f32 } else { 0.0 });
+    let pct = (shown * 100.0).clamp(0.0, 100.0);
+    let pos = scrub.read().map_or(pos, |f| (f * dur as f32) as u64);
     // Videos usually come without dimensions: a 16:9 frame (letterboxed).
     let (w, h) = match (attachment.width, attachment.height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => chat_size(w, h),
@@ -305,21 +425,116 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
     };
     let w = w.max(320);
     let clock = |ms: u64| format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60);
-    let frames = player.read().as_ref().map(|p| p.frames.clone());
-    let seek_to = move |frac: f32| {
-        if let Some(p) = player.peek().as_ref() {
-            p.seek((p.duration_ms() as f32 * frac) as u64);
+    // The canvas binds its frames once, so the player's picture needs a new
+    // one in place of the poster (keys only work in lists).
+    let shown_frames = match (player.read().as_ref(), poster.clone()) {
+        (Some(p), _) => Some((format!("player-{:p}", Rc::as_ptr(p)), p.frames.clone())),
+        (None, Some(poster)) => Some(("poster".to_string(), poster)),
+        (None, None) => None,
+    };
+    let mut seek_to = {
+        let mut open = open.clone();
+        move |frac: f32| {
+            let dur = progress.peek().1;
+            if dur == 0 {
+                return;
+            }
+            let ms = (dur as f32 * frac.clamp(0.0, 1.0)) as u64;
+            match player.peek().as_ref() {
+                Some(p) => p.seek(ms),
+                // Not loaded yet: open it paused there to show the picture.
+                None => open(Some(ms)),
+            }
+            resume_at.set(ms);
         }
     };
+    let mut set_volume = move |v: f32| {
+        volume.set(v);
+        LAST_VOLUME.with(|l| l.set(v));
+        if let Some(p) = player.peek().as_ref() {
+            p.set_volume(gain(v));
+        }
+    };
+
+    let fullscreen = {
+        let mut open = open.clone();
+        move |_| match player.peek().clone() {
+            Some(p) => super::fullscreen::open(state, super::fullscreen::FullView::Video(p)),
+            None => {
+                want_full.set(true);
+                open(None);
+            }
+        }
+    };
+    let start_frame = start.clone();
+    let controls = rsx! {
+        div {
+            class: if is_audio { "video-controls" } else { "video-controls overlay" },
+            // Placed from the frame's top: Blitz put a `bottom: 0` box (and a
+            // flex-end one) in the middle of the frame.
+            style: if is_audio { String::new() } else { format!("top: {}px; height: {OVERLAY_HEIGHT}px;", h.saturating_sub(OVERLAY_HEIGHT)) },
+            // Clicks on the controls don't play or pause.
+            onclick: move |e| e.stop_propagation(),
+            div { class: "icon-button", onclick: start,
+                if playing { Svg { icon: Icon::Pause, size: 16 } } else { Svg { icon: Icon::Play, size: 16 } }
+            }
+            if is_audio {
+                span { class: "video-name", "{attachment.name}" }
+            }
+            super::widgets::Slider {
+                value: pct,
+                min: 0.0,
+                max: 100.0,
+                steps: 200,
+                onchange: move |v: f32| {
+                    scrub.set(Some(v / 100.0));
+                    seek_to(v / 100.0);
+                },
+                onrelease: move |_| {
+                    if let Some(f) = *scrub.peek() {
+                        let dur = progress.peek().1;
+                        progress.write().0 = (f * dur as f32) as u64;
+                    }
+                    scrub.set(None);
+                },
+            }
+            span { class: "video-time", "{clock(pos)} / {clock(dur)}" }
+            // Volume: click the speaker to mute, the slider for 0–100 %.
+            div {
+                class: "icon-button",
+                title: t("media.volume"),
+                onclick: move |_| {
+                    let v = if *volume.peek() > 0.0 { 0.0 } else { 1.0 };
+                    set_volume(v);
+                },
+                if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::VolumeX, size: 16 } }
+            }
+            div { class: "video-volume",
+                super::widgets::Slider { value: *volume.read(), min: 0.0, max: 1.0, steps: 50, onchange: set_volume }
+            }
+            if !is_audio {
+                div { class: "icon-button", title: t("media.fullscreen"), onclick: fullscreen,
+                    Svg { icon: Icon::Maximize, size: 16 }
+                }
+            }
+            DownloadButton { attachment: attachment.clone() }
+        }
+    };
+    let show_controls = is_audio || !playing || (hovered && active);
 
     rsx! {
         div { class: if is_audio { "chat-video audio" } else { "chat-video" },
             style: if is_audio { String::new() } else { format!("width: {w}px;") },
             if !is_audio {
-                div { class: "video-frame", style: "height: {h}px;", onclick: start.clone(),
-                    if let Some(frames) = frames {
-                        FrameCanvas { frames: Frames(frames) }
-                    } else {
+                div { class: "video-frame", style: "height: {h}px;", onclick: start_frame,
+                    onmousemove: move |e| {
+                        mark(e);
+                        kick();
+                    },
+                    for (key, frames) in shown_frames.clone() {
+                        FrameCanvas { key: "{key}", frames: Frames(frames) }
+                    }
+                    if shown_frames.is_none() {
                         div { class: "video-poster",
                             Svg { icon: Icon::Video, size: 28 }
                             span { "{attachment.name}" }
@@ -327,21 +542,23 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
                     }
                     if !playing {
                         div { class: "play-overlay",
-                            if *loading.read() { div { class: "spinner" } } else { Svg { icon: Icon::Play, size: 26 } }
+                            if *loading.read() {
+                                div { class: "spinner" }
+                            } else {
+                                Svg { icon: Icon::Play, size: 26 }
+                            }
                         }
+                    }
+                    if let Some(pct) = *downloaded.read() {
+                        div { class: "download-progress", "{pct} %" }
+                    }
+                    if show_controls {
+                        {controls.clone()}
                     }
                 }
             }
-            div { class: "video-controls",
-                div { class: "icon-button", onclick: start,
-                    if playing { Svg { icon: Icon::Pause, size: 16 } } else { Svg { icon: Icon::Play, size: 16 } }
-                }
-                if is_audio {
-                    span { class: "video-name", "{attachment.name}" }
-                }
-                super::widgets::Slider { value: pct as f32, min: 0.0, max: 100.0, steps: 100, onchange: move |v: f32| seek_to(v / 100.0) }
-                span { class: "video-time", "{clock(pos)} / {clock(dur)}" }
-                DownloadButton { attachment: attachment.clone() }
+            if is_audio {
+                {controls}
             }
         }
     }

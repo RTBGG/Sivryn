@@ -7,6 +7,8 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 
 ## blitz-paint 0.2.1
 
+- `src/render.rs` (`render_element`): draws the scroll bar thumb of scroll containers (see
+  `scrollbar.rs` in blitz-dom).
 - `src/render.rs`: the text input caret uses the element's text colour instead of
   hard-coded black (upstream supports `caret-color` from Blitz 0.3).
 - `src/render.rs`: `<input type="password">` is painted as evenly spaced dots, with caret
@@ -21,6 +23,18 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 
 - `src/layout/construct.rs`: text inputs honour `font-family` and `font-weight`; before,
   they always used the default font.
+- `src/node/element.rs` (`TextInputData::set_text`): a value set by the app moves the caret to
+  the end, as in browsers. It stayed at its old byte position, e.g. between `@` and an inserted
+  mention.
+- `src/stylo_to_cursor_icon.rs`: `cursor: none` falls back to the default pointer; upstream hit a
+  `todo!()` and crashed the app.
+- `src/events/driver.rs`: mouse presses and releases hit-test again instead of reusing the node
+  from the last move. After the layout changed under a still pointer, clicks went to a stale or
+  removed node and were lost.
+- `src/scrollbar.rs` (+ `lib.rs`): vertical scroll bars, which Blitz didn't have. Elements with
+  `overflow-y: auto | scroll` and overflowing content get a thin bar over their right edge (no
+  layout space). blitz-paint draws it, blitz-shell passes the mouse to it: the thumb can be
+  dragged, a click in the track jumps there, hovering brightens it.
 - `src/caret.rs` (+ `document.rs`, `events/keyboard.rs`, `events/mouse.rs`, and
   `blitz-paint/src/render.rs`): the text caret blinks at the Windows rate (530 ms) and
   restarts visible on typing and clicks. The app schedules a repaint at each toggle.
@@ -38,6 +52,10 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
   so clicks above or beside a scrolled container landed on its hidden, scrolled-away children.
   Inline text only counts as hit where a line actually has text: `Cluster::from_point` snaps
   to the nearest glyph, so a click in the empty rest of a line opened the link at its end.
+- `src/document.rs` (`is_animating`): a `<canvas>` no longer makes the document count as
+  animating. Upstream repainted the whole window at the display's refresh rate for as long as
+  any canvas existed; with Vello that cost 10–20 % of a fast GPU for one small (even still)
+  image. Canvas sources request repaints themselves (see `canvas_frames.rs` in blitz-shell).
 - `src/zoom_anchor.rs` (+ `document.rs`, `lib.rs`): a scroll container with a `data-zoom`
   attribute (the current scale) keeps the point in its middle in place when the scale changes,
   instead of zoomed content growing from the top left corner (image viewer).
@@ -50,6 +68,15 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
   over ~45 ms instead of jumping), middle-click autoscroll (speed grows with the distance from
   where it started; any click ends it) and Ctrl+wheel going to an app handler
   (`blitz_shell::scrolling::set_ctrl_wheel_handler`) instead of zooming the page.
+- `src/fullscreen.rs`, `src/window.rs` (`View::init`): `blitz_shell::fullscreen::set_fullscreen`
+  puts the app's windows into borderless fullscreen and back, `set_cursor_visible` hides the
+  pointer; apps had no handle to their window.
+- `src/window.rs` (mouse input): scroll bars get the pointer first; while one is dragged the
+  page sees neither the moves nor the press and release.
+- `src/canvas_frames.rs`, `src/window.rs` (`View::init`, `View::poll`):
+  `blitz_shell::canvas_frames::request_frame()` asks every window for one repaint from any
+  thread; requests before that repaint are coalesced. Video surfaces call it when a new frame
+  arrives, so the window only repaints when something changed.
 - `src/escape.rs`, `src/window.rs`: Escape goes to an app handler first
   (`blitz_shell::escape::set_escape_handler`). Key events only reach the focused element, so
   overlays without a focused child (image viewer, settings) never saw Escape.

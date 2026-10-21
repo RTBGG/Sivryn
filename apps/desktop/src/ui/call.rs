@@ -23,31 +23,125 @@ use crate::i18n::t;
 use crate::settings::{SCREEN_FPS, ScreenResolution};
 use crate::video_surface::VideoSurface;
 
+/// Joins a voice channel and shows it, after asking when that means leaving
+/// another one (unless the user turned the question off).
+pub fn join_channel(mut state: AppState, channel: ChannelId) {
+    let elsewhere = state.call.peek().as_ref().is_some_and(|c| c.channel != channel);
+    if elsewhere && state.settings.peek().confirm_voice_switch {
+        state.modal.set(Some(Modal::SwitchVoice(channel)));
+        return;
+    }
+    show_and_join(state, channel);
+}
+
+fn show_and_join(mut state: AppState, channel: ChannelId) {
+    state.home.set(false);
+    if let Some(g) = state.guild_of(channel) {
+        state.guild.set(Some(g));
+    }
+    state.channel.set(Some(channel));
+    if !state.call.peek().as_ref().is_some_and(|c| c.channel == channel) {
+        start(state, channel, false);
+    }
+}
+
+/// "Join this voice channel?", for a channel mentioned in the chat.
 #[component]
-pub fn JoinPrompt(channel: ChannelId) -> Element {
+pub fn JoinVoiceDialog(channel: ChannelId) -> Element {
+    let mut state = use_context::<AppState>();
+    let name = state.channel_name(channel);
+    let join = move |_| {
+        state.modal.set(None);
+        show_and_join(state, channel);
+    };
+    rsx! {
+        div { class: "overlay", onclick: move |_| state.modal.set(None),
+            div { class: "dialog", onclick: move |e| e.stop_propagation(),
+                div { class: "dialog-header",
+                    h2 { {t("call.join_title")} }
+                    IconButton { icon: Icon::X, size: 18, onclick: move |_| state.modal.set(None) }
+                }
+                p { class: "muted", "„{name}“ {t(\"call.join_text\")}" }
+                div { class: "dialog-actions",
+                    button { class: "button ghost", onclick: move |_| state.modal.set(None), {t("common.cancel")} }
+                    button { class: "button primary", autofocus: "true", onclick: join, {t("call.join")} }
+                }
+            }
+        }
+    }
+}
+
+/// "You're in another voice channel. Switch?"
+#[component]
+pub fn SwitchVoiceDialog(channel: ChannelId) -> Element {
+    let mut state = use_context::<AppState>();
+    let mut dont_ask = use_signal(|| false);
+    let name = state.channel_name(channel);
+    let current = state.call.read().as_ref().map(|c| state.channel_name(c.channel)).unwrap_or_default();
+    let switch = move |_| {
+        if *dont_ask.peek() {
+            state.update_settings(|s| s.confirm_voice_switch = false);
+        }
+        state.modal.set(None);
+        show_and_join(state, channel);
+    };
+    rsx! {
+        div { class: "overlay", onclick: move |_| state.modal.set(None),
+            div { class: "dialog", onclick: move |e| e.stop_propagation(),
+                div { class: "dialog-header",
+                    h2 { {t("call.switch_title")} }
+                    IconButton { icon: Icon::X, size: 18, onclick: move |_| state.modal.set(None) }
+                }
+                p { class: "muted", "{t(\"call.switch_text_1\")} „{current}“{t(\"call.switch_text_2\")} „{name}“ {t(\"call.switch_text_3\")}" }
+                div { class: "check-row", onclick: move |_| dont_ask.toggle(),
+                    div { class: if *dont_ask.read() { "checkbox on" } else { "checkbox" },
+                        if *dont_ask.read() { Svg { icon: Icon::Check, size: 13 } }
+                    }
+                    span { {t("call.dont_ask_again")} }
+                }
+                div { class: "dialog-actions",
+                    button { class: "button ghost", onclick: move |_| state.modal.set(None), {t("common.cancel")} }
+                    button { class: "button primary", autofocus: "true", onclick: switch, {t("call.switch_action")} }
+                }
+            }
+        }
+    }
+}
+
+/// A voice channel: its call (or who is there while not connected), with
+/// its chat at the side when opened.
+#[component]
+pub fn VoiceArea(channel: ChannelId) -> Element {
     let state = use_context::<AppState>();
-    let services = use_context::<Services>();
-    let mut joining = use_signal(|| false);
+    let in_call = state.call.read().as_ref().is_some_and(|c| c.channel == channel);
+    let chat = *state.voice_chat.read();
+    rsx! {
+        div { class: "voice-area",
+            if in_call {
+                CallView {}
+            } else {
+                VoiceIdle { channel }
+            }
+            if chat {
+                div { class: "voice-chat-panel", style: "width: {super::resize::width(&state, super::resize::Pane::VoiceChat)}px;",
+                    for c in [channel] {
+                        super::chat_view::ChatView { key: "{c}", channel: c, side: true }
+                    }
+                    // Last: Blitz paints and hit-tests later siblings over it otherwise.
+                    super::resize::ResizeHandle { pane: super::resize::Pane::VoiceChat }
+                }
+            }
+        }
+    }
+}
+
+/// A voice channel you aren't connected to (connecting, or only reading its chat).
+#[component]
+fn VoiceIdle(channel: ChannelId) -> Element {
+    let state = use_context::<AppState>();
     let name = state.channel_name(channel);
     let present = state.voice.read().get(&channel).cloned().unwrap_or_default();
-
-    let join = move |_| {
-        if *joining.peek() {
-            return;
-        }
-        joining.set(true);
-        let engine = services.engine.clone();
-        // Runs in the root scope: this component unmounts as soon as the call
-        // view takes over, which would cancel a task spawned here.
-        spawn_forever(async move {
-            let result = connect(state, channel, engine).await;
-            joining.set(false);
-            if let Err(e) = result {
-                state.report(Err(e));
-            }
-        });
-    };
-
+    let connecting = *state.connecting.read() == Some(channel);
     rsx! {
         div { class: "join",
             div { class: "join-card",
@@ -63,16 +157,28 @@ pub fn JoinPrompt(channel: ChannelId) -> Element {
                     }
                     p { class: "muted", "{present.len()} {t(\"call.people_here\")}" }
                 }
-                button { class: if *joining.read() { "button primary large busy" } else { "button primary large" }, onclick: join,
-                    if *joining.read() { {t("call.connecting")} } else { {t("call.join")} }
+                button {
+                    class: if connecting { "button primary large busy" } else { "button primary large" },
+                    onclick: move |_| join_channel(state, channel),
+                    if connecting { {t("call.connecting")} } else { {t("call.join")} }
                 }
-                p { class: "join-hint", {t("call.quality_hint")} }
             }
         }
     }
 }
 
 async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::AudioEngine) -> Result<(), String> {
+    state.connecting.set(Some(channel));
+    let result = connect_inner(state, channel, engine).await;
+    state.connecting.set(None);
+    result
+}
+
+async fn connect_inner(
+    mut state: AppState,
+    channel: ChannelId,
+    engine: sivryn_media::AudioEngine,
+) -> Result<(), String> {
     let Some(s) = state.session.cloned() else { return Ok(()) };
     if let Some(old) = state.call.take() {
         leave(old).await;
@@ -92,9 +198,19 @@ async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::
     }
     let silenced = *state.muted.peek() || *state.deafened.peek();
     call.set_muted(silenced);
+    let deafened = *state.deafened.peek();
+    if deafened {
+        call.set_deafened(true);
+    }
 
     let identity = call.identity();
-    let me = Participant { identity: identity.clone(), name: s.user.username.clone(), muted: silenced, sharing: false };
+    let me = Participant {
+        identity: identity.clone(),
+        name: s.user.username.clone(),
+        muted: silenced,
+        deafened,
+        sharing: false,
+    };
     state.call.set(Some(CallState {
         channel,
         join,
@@ -137,13 +253,24 @@ async fn connect(mut state: AppState, channel: ChannelId, engine: sivryn_media::
                 CallEvent::ParticipantJoined { identity, .. } => {
                     if !c.participants.iter().any(|p| p.identity == identity) {
                         let name = joined_name.unwrap_or_default();
-                        c.participants.push(Participant { identity, name, muted: false, sharing: false });
+                        c.participants.push(Participant {
+                            identity,
+                            name,
+                            muted: false,
+                            deafened: false,
+                            sharing: false,
+                        });
                     }
                 }
                 CallEvent::ParticipantLeft { identity } => c.participants.retain(|p| p.identity != identity),
                 CallEvent::MuteChanged { identity, muted } => {
                     if let Some(p) = c.participants.iter_mut().find(|p| p.identity == identity) {
                         p.muted = muted;
+                    }
+                }
+                CallEvent::DeafenChanged { identity, deafened } => {
+                    if let Some(p) = c.participants.iter_mut().find(|p| p.identity == identity) {
+                        p.deafened = deafened;
                     }
                 }
                 CallEvent::ShareChanged { identity, sharing } => {
@@ -196,6 +323,10 @@ pub fn hang_up(mut state: AppState) {
 pub fn stop_share(mut state: AppState) {
     let parts = state.call.write().as_mut().map(|c| {
         c.sharing = false;
+        if let Some(share) = c.share.borrow().as_ref() {
+            let sid = share.preview.track_sid.clone();
+            c.feeds.retain(|f| f.track_sid != sid);
+        }
         let me = c.identity.clone();
         if let Some(p) = c.participants.iter_mut().find(|p| p.identity == me) {
             p.sharing = false;
@@ -203,6 +334,9 @@ pub fn stop_share(mut state: AppState) {
         (c.share.borrow_mut().take(), c.share_audio.borrow_mut().take())
     });
     if let Some((share, audio)) = parts {
+        if share.is_some() {
+            super::use_services_engine().play(Sound::ShareStop);
+        }
         spawn_forever(async move {
             if let Some(audio) = audio {
                 audio.stop().await;
@@ -279,24 +413,28 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
             Focus::Screen(sid) => screens.iter().any(|s| &s.track_sid == sid),
             Focus::User(id) => c.participants.iter().any(|p| &p.identity == id),
         })
-        .or_else(|| screens.first().filter(|_| c.auto_focus).map(|s| Focus::Screen(s.track_sid.clone())));
+        // Others' screens come up large by themselves, your own preview doesn't.
+        .or_else(|| {
+            screens
+                .iter()
+                .find(|s| s.participant != c.identity)
+                .filter(|_| c.auto_focus)
+                .map(|s| Focus::Screen(s.track_sid.clone()))
+        });
     let participants = c.participants.clone();
     let speakers = c.speakers.clone();
     let cameras: Vec<VideoFeed> = c.feeds.iter().filter(|f| f.source == TrackSource::Camera).cloned().collect();
     let strip_hidden = c.strip_hidden;
     let (sharing, camera_on) = (c.sharing, c.camera_on);
-    let big_screen = match &focus {
-        Some(Focus::Screen(sid)) => screens.iter().find(|s| &s.track_sid == sid).cloned(),
-        _ => None,
-    };
-    let big_user = match &focus {
-        Some(Focus::User(id)) => participants.iter().find(|p| &p.identity == id).cloned(),
-        _ => None,
-    };
-    let other_screens: Vec<VideoFeed> =
-        screens.iter().filter(|s| Some(&s.track_sid) != big_screen.as_ref().map(|b| &b.track_sid)).cloned().collect();
-    let other_people: Vec<Participant> =
-        participants.iter().filter(|p| Some(&p.identity) != big_user.as_ref().map(|b| &b.identity)).cloned().collect();
+    // Every tile in one keyed list with the focused one first: a tile that
+    // moves between the big spot and the strip is moved, not rebuilt
+    // (rebuilding video surfaces made quick focus changes get lost).
+    let mut tiles: Vec<StageTile> = screens.iter().cloned().map(StageTile::Screen).collect();
+    tiles.extend(participants.iter().cloned().map(StageTile::Person));
+    if let Some(i) = tiles.iter().position(|t| Some(t.focus()) == focus) {
+        let big = tiles.remove(i);
+        tiles.insert(0, big);
+    }
     drop(call);
     let muted = *state.muted.read() || *state.deafened.read();
     let deafened = *state.deafened.read();
@@ -313,50 +451,53 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
                 span { class: "muted small", "{count} {t(\"call.in_call\")}" }
                 // Voice channels have a chat of their own.
                 if state.channel_kind(channel) == Some(sivryn_client_core::protocol::model::ChannelKind::Voice) {
-                    IconButton { icon: Icon::Message, size: 18, title: t("channels.open_chat"), onclick: move |_| state.voice_chat.set(true) }
+                    IconButton { icon: Icon::Message, size: 18, title: t("channels.open_chat"), onclick: move |_| state.voice_chat.toggle() }
                 }
             }
             }
             div { class: if focus.is_some() { "stage focus" } else { "stage" },
-                if let Some(feed) = big_screen.clone() {
-                    div { class: "stage-main",
-                        VideoTile { key: "{feed.track_sid}", feed, large: true }
-                    }
-                }
-                if let Some(p) = big_user.clone() {
-                    div { class: "stage-main",
-                        ParticipantTile {
-                            key: "{p.identity}",
-                            camera: cameras.iter().find(|f| f.participant == p.identity).cloned(),
-                            speaking: speakers.contains(&p.identity),
-                            participant: p,
-                            large: true,
-                        }
-                    }
-                }
-                if focus.is_some() {
-                    div { class: "strip-toggle",
-                        onclick: move |_| {
-                            if let Some(c) = state.call.write().as_mut() {
-                                c.strip_hidden = !c.strip_hidden;
+                div {
+                    class: match (focus.is_some(), strip_hidden) {
+                        (true, true) => "stage-tiles focus strip-hidden",
+                        (true, false) => "stage-tiles focus",
+                        _ => "stage-tiles",
+                    },
+                    // First in the flow, so it sits above the (centred) strip.
+                    if focus.is_some() {
+                        div { class: "strip-toggle-row",
+                            div { class: "strip-toggle",
+                                onclick: move |_| {
+                                    if let Some(c) = state.call.write().as_mut() {
+                                        c.strip_hidden = !c.strip_hidden;
+                                    }
+                                },
+                                if strip_hidden { Svg { icon: Icon::ChevronDown, size: 14 } } else { Svg { icon: Icon::ChevronRight, size: 14 } }
+                                if strip_hidden { {t("call.show_members")} } else { {t("call.hide_members")} }
                             }
-                        },
-                        if strip_hidden { Svg { icon: Icon::ChevronDown, size: 14 } } else { Svg { icon: Icon::ChevronRight, size: 14 } }
-                        if strip_hidden { {t("call.show_members")} } else { {t("call.hide_members")} }
-                    }
-                }
-                if focus.is_none() || !strip_hidden {
-                    div { class: "stage-grid",
-                        for feed in other_screens {
-                            VideoTile { key: "{feed.track_sid}", feed: feed.clone(), large: false }
                         }
-                        for p in other_people {
-                            ParticipantTile {
-                                key: "{p.identity}",
-                                camera: cameras.iter().find(|f| f.participant == p.identity).cloned(),
-                                speaking: speakers.contains(&p.identity),
-                                participant: p,
-                                large: false,
+                    }
+                    for (i, tile) in tiles.into_iter().enumerate() {
+                        {
+                            let big = focus.is_some() && i == 0;
+                            let in_strip = focus.is_some() && i > 0;
+                            match tile {
+                                StageTile::Screen(feed) => rsx! {
+                                    if !(in_strip && strip_hidden) {
+                                        VideoTile { key: "{feed.track_sid}", feed: feed.clone(), large: big }
+                                    }
+                                },
+                                StageTile::Person(p) => rsx! {
+                                    if !(in_strip && strip_hidden) {
+                                        ParticipantTile {
+                                            key: "{p.identity}",
+                                            camera: cameras.iter().find(|f| f.participant == p.identity).cloned(),
+                                            speaking: speakers.contains(&p.identity),
+                                            participant: p,
+                                            large: big,
+                                            strip: in_strip,
+                                        }
+                                    }
+                                },
                             }
                         }
                     }
@@ -389,9 +530,31 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
     }
 }
 
+/// A tile on the call stage.
+#[derive(Clone, PartialEq)]
+enum StageTile {
+    Screen(VideoFeed),
+    Person(Participant),
+}
+
+impl StageTile {
+    fn focus(&self) -> Focus {
+        match self {
+            StageTile::Screen(feed) => Focus::Screen(feed.track_sid.clone()),
+            StageTile::Person(p) => Focus::User(p.identity.clone()),
+        }
+    }
+}
+
 /// A participant: their camera if it's on, otherwise their avatar.
 #[component]
-fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking: bool, large: bool) -> Element {
+fn ParticipantTile(
+    participant: Participant,
+    camera: Option<VideoFeed>,
+    speaking: bool,
+    large: bool,
+    #[props(default)] strip: bool,
+) -> Element {
     let state = use_context::<AppState>();
     let call_channel = state.call.read().as_ref().map(|c| c.channel);
     let id: Option<sivryn_client_core::protocol::UserId> = participant.identity.parse().ok();
@@ -421,8 +584,11 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
     };
 
     let focus_key = Focus::User(participant.identity.clone());
+    let (hovered, mark) = super::widgets::use_hover();
+    let camera_sid = camera.as_ref().map(|f| f.track_sid.clone());
     rsx! {
         div { class: "{class}",
+            onmousemove: mark,
             // Left click shows this person large (again: back to the grid).
             onclick: move |_| toggle_focus(state, focus_key.clone()),
             onmousedown: move |e| {
@@ -434,12 +600,14 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
                 Some(feed) => rsx! { VideoCanvas { key: "{feed.track_sid}", feed } },
                 None => rsx! {
                     div { class: "tile-avatar",
-                        Avatar { name: name.clone(), id, size: if large { 128 } else { 76 }, speaking }
+                        Avatar { name: name.clone(), id, size: if large { 160 } else if strip { 64 } else { 96 }, speaking }
                     }
                 },
             }
             div { class: "name-tag",
-                if participant.muted {
+                if participant.deafened {
+                    span { class: "tag-muted", Svg { icon: Icon::HeadphonesOff, size: 13 } }
+                } else if participant.muted {
                     span { class: "tag-muted", Svg { icon: Icon::MicOff, size: 13 } }
                 }
                 span { "{name}" }
@@ -447,6 +615,26 @@ fn ParticipantTile(participant: Participant, camera: Option<VideoFeed>, speaking
                     span { class: "live-badge", "LIVE" }
                 }
             }
+            if let (true, Some(sid)) = (hovered, camera_sid) {
+                FullscreenButton { sid }
+            }
+        }
+    }
+}
+
+/// Shows a tile's video over the whole screen (on hover, top right).
+#[component]
+fn FullscreenButton(sid: String) -> Element {
+    let state = use_context::<AppState>();
+    rsx! {
+        div {
+            class: "tile-fullscreen",
+            title: t("media.fullscreen"),
+            onclick: move |e| {
+                e.stop_propagation();
+                super::fullscreen::open(state, super::fullscreen::FullView::Feed(sid.clone()));
+            },
+            Svg { icon: Icon::Maximize, size: 16 }
         }
     }
 }
@@ -476,14 +664,20 @@ fn VideoTile(feed: VideoFeed, large: bool) -> Element {
     let guild = state.call.read().as_ref().and_then(|c| state.guild_of(c.channel));
     let name = feed.participant.parse().map(|id| state.display_name_in(guild, id)).unwrap_or(feed.participant.clone());
     let sid = feed.track_sid.clone();
+    let full_sid = feed.track_sid.clone();
+    let (hovered, mark) = super::widgets::use_hover();
     rsx! {
         div {
             class: if large { "tile screen large" } else { "tile screen" },
+            onmousemove: mark,
             onclick: move |_| toggle_focus(state, Focus::Screen(sid.clone())),
             VideoCanvas { feed }
             div { class: "name-tag",
                 Svg { icon: Icon::Monitor, size: 13 }
                 span { "{name}" }
+            }
+            if hovered {
+                FullscreenButton { sid: full_sid }
             }
         }
     }
@@ -532,7 +726,11 @@ pub fn ScreenPicker() -> Element {
             match result {
                 Ok(share) => {
                     tracing::info!(codec = ?share.codec, "screen share started");
+                    let preview = share.preview.clone();
                     *c.share.borrow_mut() = Some(share);
+                    if let Some(call) = state.call.write().as_mut() {
+                        call.feeds.push(preview);
+                    }
                     if video.screen_audio {
                         let target = match source.kind {
                             SourceKind::Window => window_process(source.id).map(LoopbackTarget::Process),
@@ -692,7 +890,6 @@ pub fn start(state: AppState, channel: ChannelId, camera: bool) {
     spawn_forever(async move {
         match connect(state, channel, engine.clone()).await {
             Ok(()) => {
-                engine.play(Sound::Join);
                 if camera {
                     toggle_camera(state);
                 }

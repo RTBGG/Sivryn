@@ -14,30 +14,36 @@ pub enum Sound {
     Undeafen,
     Message,
     ShareStart,
+    ShareStop,
     /// Incoming call; the app repeats it until answered.
     Ring,
 }
 
 /// A sequence of notes (frequency in Hz, duration in ms), soft sine with a
-/// quick attack and exponential decay per note.
+/// gentle attack and exponential decay per note. Each note rings on under
+/// the next one and fades out smoothly instead of stopping mid-wave, which
+/// is what made the old chimes click between notes.
 fn chime(notes: &[(f32, u32)], volume: f32) -> Arc<[f32]> {
-    let mut out = Vec::new();
+    const ATTACK_S: f32 = 0.008;
+    const RING_S: f32 = 0.06;
+    let total: usize = notes.iter().map(|&(_, ms)| RATE as usize * ms as usize / 1000).sum();
+    let mut out = vec![0.0f32; total + (RATE as f32 * RING_S) as usize];
+    let mut start = 0;
     for &(freq, ms) in notes {
-        let len = (RATE as usize * ms as usize) / 1000;
-        for i in 0..len {
+        let len = RATE as usize * ms as usize / 1000;
+        let ring = (RATE as f32 * RING_S) as usize;
+        for i in 0..(len + ring).min(out.len() - start) {
             let t = i as f32 / RATE as f32;
-            let attack = (i as f32 / (RATE as f32 * 0.004)).min(1.0);
+            // Raised-cosine attack and release: smooth at both ends.
+            let attack = if t < ATTACK_S { 0.5 - 0.5 * (std::f32::consts::PI * t / ATTACK_S).cos() } else { 1.0 };
+            let release =
+                if i < len { 1.0 } else { 0.5 + 0.5 * (std::f32::consts::PI * (i - len) as f32 / ring as f32).cos() };
             let decay = (-t * 9.0).exp();
             // A quiet octave on top makes the tone rounder than a pure sine.
             let tone = (t * freq * std::f32::consts::TAU).sin() + 0.25 * (t * freq * 2.0 * std::f32::consts::TAU).sin();
-            out.push(tone * attack * decay * volume);
+            out[start + i] += tone * attack * release * decay * volume;
         }
-    }
-    // Short fade so the last note never ends in a click.
-    let fade = (RATE as usize / 200).min(out.len());
-    let n = out.len();
-    for (k, s) in out[n - fade..].iter_mut().enumerate() {
-        *s *= 1.0 - k as f32 / fade as f32;
+        start += len;
     }
     out.into()
 }
@@ -54,6 +60,7 @@ pub fn samples(sound: Sound) -> Arc<[f32]> {
             (Sound::Undeafen, chime(&[(261.6, 80), (329.6, 80), (440.0, 140)], 0.18)),
             (Sound::Message, chime(&[(1318.5, 160)], 0.12)),
             (Sound::ShareStart, chime(&[(523.3, 70), (659.3, 70), (784.0, 180)], 0.18)),
+            (Sound::ShareStop, chime(&[(784.0, 70), (659.3, 70), (523.3, 180)], 0.18)),
             (Sound::Ring, chime(&[(784.0, 120), (987.8, 120), (784.0, 120), (987.8, 260)], 0.2)),
         ]
     });
@@ -75,12 +82,18 @@ mod tests {
             Sound::Undeafen,
             Sound::Message,
             Sound::ShareStart,
+            Sound::ShareStop,
             Sound::Ring,
         ] {
             let s = samples(sound);
             assert!(s.len() < RATE as usize, "{sound:?} shorter than a second");
             assert!(s.iter().all(|x| x.abs() < 0.5), "{sound:?} stays quiet");
             assert!(s.last().unwrap().abs() < 1e-3, "{sound:?} ends silent");
+            assert!(s[0].abs() < 1e-3, "{sound:?} starts silent");
+            // No jumps between neighbouring samples (what clicks sound like).
+            let max_step = s.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+            // A pure tone changes by at most ~0.05 per sample; a click jumps by its full amplitude.
+            assert!(max_step < 0.08, "{sound:?} jumps by {max_step}");
         }
     }
 }

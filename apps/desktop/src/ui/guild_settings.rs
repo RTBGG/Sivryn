@@ -15,6 +15,7 @@ use crate::i18n::t;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Overview,
+    Roles,
     Bans,
 }
 
@@ -24,7 +25,16 @@ pub fn GuildSettings(guild: GuildId) -> Element {
     let perms = state.permissions(guild);
     let can_manage = perms.allows(Permissions::MANAGE_GUILD);
     let can_ban = perms.allows(Permissions::BAN_MEMBERS);
-    let mut page = use_signal(move || if can_manage { Page::Overview } else { Page::Bans });
+    let can_roles = perms.allows(Permissions::MANAGE_ROLES);
+    let mut page = use_signal(move || {
+        if can_manage {
+            Page::Overview
+        } else if can_roles {
+            Page::Roles
+        } else {
+            Page::Bans
+        }
+    });
     let Some(g) = state.guild(guild) else { return rsx! {} };
     let current = *page.read();
 
@@ -43,6 +53,12 @@ pub fn GuildSettings(guild: GuildId) -> Element {
                         span { {t("guild.overview")} }
                     }
                 }
+                if can_roles {
+                    div { class: if current == Page::Roles { "nav-item active" } else { "nav-item" }, onclick: move |_| page.set(Page::Roles),
+                        Svg { icon: Icon::Shield, size: 18 }
+                        span { {t("roles.title")} }
+                    }
+                }
                 if can_ban {
                     div { class: if current == Page::Bans { "nav-item active" } else { "nav-item" }, onclick: move |_| page.set(Page::Bans),
                         Svg { icon: Icon::Ban, size: 18 }
@@ -56,6 +72,7 @@ pub fn GuildSettings(guild: GuildId) -> Element {
                     div { class: "settings-content",
                         match p {
                             Page::Overview => rsx! { Overview { guild } },
+                            Page::Roles => rsx! { super::roles::RolesPage { guild } },
                             Page::Bans => rsx! { Bans { guild } },
                         }
                     }
@@ -231,51 +248,13 @@ fn DeleteGuild(guild: GuildId, name: String) -> Element {
 #[component]
 fn GuildIconEditor(guild: GuildId) -> Element {
     let state = use_context::<AppState>();
-    let mut busy = use_signal(|| false);
+    let busy = use_signal(|| false);
     let g = state.guild(guild);
     let name = g.as_ref().map(|g| g.name.clone()).unwrap_or_default();
     let icon = g.and_then(|g| g.icon_id);
 
-    let pick = move |_| {
-        let Some(s) = state.session.cloned() else { return };
-        if *busy.peek() {
-            return;
-        }
-        spawn_forever(async move {
-            let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title(t("guild.pick_icon"))
-                .add_filter("Bilder", &["png", "jpg", "jpeg", "gif", "webp"])
-                .pick_file()
-                .await
-            else {
-                return;
-            };
-            busy.set(true);
-            let bytes = file.read().await;
-            // Square and small: icons are shown at most 80 px.
-            let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-                let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-                let side = img.width().min(img.height());
-                let square = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side);
-                let small = square.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
-                let mut out = Vec::new();
-                small
-                    .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                Ok(out)
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
-            let result = match png {
-                Ok(png) => s.api.set_guild_icon(guild, "image/png", png).await.map(|_| ()).map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            busy.set(false);
-            state.report(result);
-            state.report(state.refresh().await);
-        });
-    };
+    // Pick an image and crop it to a 256 px square (GIFs stay animated).
+    let pick = move |_| super::crop::pick(state, super::crop::CropPurpose::GuildIcon(guild));
 
     rsx! {
         div { class: "icon-editor",
@@ -296,24 +275,34 @@ pub fn GuildIcon(
     #[props(default = 48)] size: u32,
 ) -> Element {
     let state = use_context::<AppState>();
+    // Animated icons play only while hovered (each frame repaints the window).
+    let (hovered, mark) = super::widgets::use_hover();
+    let gate = use_hook(move || std::rc::Rc::new(tokio::sync::watch::channel(false)));
+    if *gate.0.borrow() != hovered {
+        let _ = gate.0.send(hovered);
+    }
+    let gate_rx = gate.1.clone();
     // Reactive on `icon`: a new icon must reload even in the same component.
-    let frames = use_resource(use_reactive!(|icon, size| async move {
-        let s = state.session.cloned()?;
-        let id = icon?;
-        let bytes = match crate::files::fetch_plain(&s, id).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "server icon unavailable");
-                return None;
-            }
-        };
-        let decoded =
-            tokio::task::spawn_blocking(move || crate::files::decode(&bytes, size * 2, size * 2)).await.ok()?;
-        match decoded {
-            Ok(d) => Some((id, crate::files::play(d))),
-            Err(e) => {
-                tracing::warn!(error = %e, "server icon unreadable");
-                None
+    let frames = use_resource(use_reactive!(|icon, size| {
+        let gate_rx = gate_rx.clone();
+        async move {
+            let s = state.session.cloned()?;
+            let id = icon?;
+            let bytes = match crate::files::fetch_plain(&s, id).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "server icon unavailable");
+                    return None;
+                }
+            };
+            let decoded =
+                tokio::task::spawn_blocking(move || crate::files::decode(&bytes, size * 2, size * 2)).await.ok()?;
+            match decoded {
+                Ok(d) => Some((id, crate::files::play_gated(d, gate_rx))),
+                Err(e) => {
+                    tracing::warn!(error = %e, "server icon unreadable");
+                    None
+                }
             }
         }
     }));
@@ -321,7 +310,7 @@ pub fn GuildIcon(
         name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
     match frames.read().clone().flatten() {
         Some((id, frames)) => rsx! {
-            div { class: "guild-icon", style: "width: {size}px; height: {size}px;",
+            div { class: "guild-icon", style: "width: {size}px; height: {size}px;", onmousemove: mark,
                 // Keyed by the loaded icon (keys only work in lists), so a new
                 // icon gets a new canvas once it has loaded.
                 for id in [id] {

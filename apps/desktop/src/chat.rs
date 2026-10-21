@@ -123,6 +123,26 @@ pub async fn add_user(s: &Session, channel: ChannelId, user: UserId) -> Result<(
     submit(s, channel, pending, claimed.iter().map(|c| c.device_id).collect()).await
 }
 
+/// Makes the channel's group match who may read the channel: adds people
+/// who gained access (or joined) and removes those who lost it.
+pub async fn sync_members(s: &Session, channel: ChannelId) -> Result<(), String> {
+    if !s.mls.borrow().has_group(channel) {
+        return Ok(());
+    }
+    let allowed: Vec<UserId> =
+        s.api.channel_members(channel).await.map_err(|e| e.to_string())?.into_iter().map(|u| u.id).collect();
+    let present: Vec<UserId> =
+        s.mls.borrow().member_identities(channel).iter().filter_map(|id| id.parse().ok()).collect();
+    let gone: Vec<UserId> = present.iter().copied().filter(|u| *u != s.user.id && !allowed.contains(u)).collect();
+    if !gone.is_empty() {
+        remove_users(s, channel, &gone).await?;
+    }
+    for user in allowed.into_iter().filter(|u| *u != s.user.id && !present.contains(u)) {
+        add_user(s, channel, user).await?;
+    }
+    Ok(())
+}
+
 /// Removes all devices of `users` from the channel's group (kicked, banned
 /// or left), so they can't read anything sent from now on.
 pub async fn remove_users(s: &Session, channel: ChannelId, users: &[UserId]) -> Result<(), String> {

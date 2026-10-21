@@ -17,23 +17,34 @@ pub fn Shell() -> Element {
     let state = use_context::<AppState>();
     let channel = *state.channel.read();
     let home = *state.home.read();
-    let in_call_here = state.call.read().as_ref().is_some_and(|c| Some(c.channel) == channel);
-    let voice_chat = *state.voice_chat.read();
     let drag = *state.drag_over.read();
 
     rsx! {
         div { class: "app",
+            onmousemove: move |e| {
+                use dioxus_native::prelude::dioxus_elements::input_data::MouseButton;
+                super::widgets::slider_pointer_move(e.client_coordinates().x, e.held_buttons().contains(MouseButton::Primary));
+                super::widgets::hover_root_move();
+                super::resize::on_move(state, &e);
+                super::dnd::on_move(state, &e);
+            },
+            onmouseup: move |_| {
+                super::widgets::slider_pointer_up();
+                super::resize::finish(state);
+                super::dnd::finish(state);
+            },
             GuildRail {}
-            Sidebar {}
+            div { class: "sidebar-wrap", style: "width: {super::resize::width(&state, super::resize::Pane::Sidebar)}px;",
+                Sidebar {}
+                super::resize::ResizeHandle { pane: super::resize::Pane::Sidebar }
+            }
             main { class: "main",
+                onmousemove: move |_| super::dnd::clear_target(state),
                 if *state.connection.read() == Connection::Offline {
                     div { class: "offline-bar", {t("shell.offline")} }
                 }
                 match channel.and_then(|c| state.channel_kind(c)) {
-                    // A voice channel's own chat.
-                    Some(ChannelKind::Voice) if voice_chat => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },
-                    Some(ChannelKind::Voice) if in_call_here => rsx! { call::CallView {} },
-                    Some(ChannelKind::Voice) => rsx! { call::JoinPrompt { channel: channel.unwrap() } },
+                    Some(ChannelKind::Voice) => rsx! { call::VoiceArea { channel: channel.unwrap() } },
                     Some(_) => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },
                     None if home => rsx! { home::FriendsPage {} },
                     None => rsx! { Welcome {} },
@@ -54,6 +65,10 @@ pub fn Shell() -> Element {
             if state.settings_page.read().is_some() {
                 settings_view::SettingsView {}
             }
+            // Above the settings and dialogs it is opened from.
+            super::crop::CropDialog {}
+            // Last, so it's painted above everything.
+            super::dnd::DragGhost {}
         }
     }
 }
@@ -80,7 +95,7 @@ fn Welcome() -> Element {
     }
 }
 
-fn select_guild(mut state: AppState, id: GuildId) {
+pub(super) fn select_guild(mut state: AppState, id: GuildId) {
     let switching = *state.home.peek() || *state.guild.peek() != Some(id);
     state.home.set(false);
     if switching {
@@ -362,8 +377,15 @@ fn ModalView() -> Element {
         Some(Modal::CreateChannel(guild, category, kind)) => {
             rsx! { channels::CreateChannelDialog { guild, category, kind } }
         }
-        Some(Modal::Category(guild, existing)) => rsx! { channels::CategoryDialog { guild, existing } },
-        Some(Modal::ChannelSettings(channel)) => rsx! { channels::ChannelSettingsDialog { channel } },
+        Some(Modal::Category(_, Some(category))) => {
+            rsx! { super::place_settings::PlaceSettings { place: super::place_settings::Place::Category(category) } }
+        }
+        Some(Modal::Category(guild, None)) => rsx! { channels::CategoryDialog { guild, existing: None } },
+        Some(Modal::ChannelSettings(channel)) => {
+            rsx! { super::place_settings::PlaceSettings { place: super::place_settings::Place::Channel(channel) } }
+        }
+        Some(Modal::SwitchVoice(channel)) => rsx! { call::SwitchVoiceDialog { channel } },
+        Some(Modal::JoinVoice(channel)) => rsx! { call::JoinVoiceDialog { channel } },
         Some(Modal::NotifySettings(guild)) => rsx! { channels::NotifyDialog { guild } },
         Some(modal) => rsx! { GuildDialog { key: "{modal:?}", modal } },
         None => rsx! {},

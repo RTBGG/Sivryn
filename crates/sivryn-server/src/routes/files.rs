@@ -3,8 +3,8 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use sivryn_protocol::api::UploadedFile;
 use sivryn_protocol::permissions::Permissions;
 use sivryn_protocol::{ChannelId, FileId, GuildId};
@@ -47,13 +47,27 @@ pub async fn upload(
 /// A file's channel, guild, owner and content type.
 type FileAccessRow = (Option<Uuid>, Option<Uuid>, Option<Uuid>, String);
 
+/// The start of an open-ended `Range: bytes=N-` request (the form clients
+/// use to resume a download). Other forms get the whole file.
+fn range_start(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(header::RANGE)?.to_str().ok()?;
+    let rest = value.trim().strip_prefix("bytes=")?;
+    let (start, end) = rest.split_once('-')?;
+    if !end.trim().is_empty() {
+        return None;
+    }
+    start.trim().parse().ok()
+}
+
 /// Serves a file to anyone who may read its channel (attachments), who is a
 /// member of its guild (icons), or to anyone signed in (avatars, banners).
+/// `Range: bytes=N-` resumes an interrupted download.
 pub async fn download(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(file_id): Path<FileId>,
-) -> ApiResult<impl IntoResponse> {
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     let row: Option<FileAccessRow> =
         sqlx::query_as("SELECT channel_id, guild_id, owner_user_id, content_type FROM files WHERE id = $1")
             .bind(file_id.0)
@@ -70,12 +84,43 @@ pub async fn download(
         (None, None, None) => return Err(ApiError::NotFound),
     }
     let bytes = crate::storage::load(&state.config.files_dir, file_id).await.map_err(|_| ApiError::NotFound)?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, content_type),
-            // Content never changes for an ID.
-            (header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_owned()),
-        ],
-        bytes,
-    ))
+    let total = bytes.len() as u64;
+    let common = [
+        (header::CONTENT_TYPE, content_type),
+        // Content never changes for an ID.
+        (header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_owned()),
+        (header::ACCEPT_RANGES, "bytes".to_owned()),
+    ];
+    match range_start(&headers) {
+        Some(start) if start >= total => {
+            Ok((StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{total}"))])
+                .into_response())
+        }
+        Some(start) => {
+            let part = Bytes::from(bytes).slice(start as usize..);
+            let range = format!("bytes {start}-{}/{total}", total - 1);
+            Ok((StatusCode::PARTIAL_CONTENT, common, [(header::CONTENT_RANGE, range)], part).into_response())
+        }
+        None => Ok((common, bytes).into_response()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_open_ended_ranges_resume() {
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::RANGE, v.parse().unwrap());
+            range_start(&h)
+        };
+        assert_eq!(with("bytes=1024-"), Some(1024));
+        assert_eq!(with("bytes=0-"), Some(0));
+        assert_eq!(with("bytes=0-99"), None);
+        assert_eq!(with("bytes=-500"), None);
+        assert_eq!(with("items=5-"), None);
+        assert_eq!(range_start(&HeaderMap::new()), None);
+    }
 }

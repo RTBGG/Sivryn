@@ -18,6 +18,8 @@ use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{ApiError, ApiResult};
 
+/// Participant attribute a client sets to "1" while its sound is off.
+pub const DEAFENED_ATTRIBUTE: &str = "deafened";
 const TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const LIVEKIT_API_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -31,9 +33,10 @@ pub async fn join(
         return Err(ApiError::BadRequest("this channel has no calls".into()));
     }
 
-    // DMs and groups allow everything a call needs; guilds use their roles.
+    // DMs and groups allow everything a call needs; guilds use the member's
+    // permissions in this channel.
     let perms = match channel.guild() {
-        Some(guild) => db::guild_permissions(&state.db, guild, auth.id).await?.ok_or(ApiError::NotFound)?,
+        Some(_) => db::channel_permissions_of(&state.db, &channel, auth.id).await?.ok_or(ApiError::NotFound)?,
         None => Permissions::SPEAK | Permissions::VIDEO | Permissions::SCREEN_SHARE,
     };
     let user = db::user(&state.db, auth.id).await?;
@@ -57,6 +60,8 @@ pub async fn join(
         can_publish_sources: sources,
         can_subscribe: Some(true),
         can_publish_data: Some(true),
+        // Clients announce whether they turned their sound off as an attribute.
+        can_update_own_metadata: Some(true),
         ..Default::default()
     };
 
@@ -103,14 +108,21 @@ pub async fn guild_states(
     auth: AuthUser,
     Path(guild_id): Path<GuildId>,
 ) -> ApiResult<Json<Vec<VoiceChannelState>>> {
-    db::require(&state.db, guild_id, auth.id, Permissions::VIEW_CHANNEL).await?;
-    let channels: Vec<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM channels WHERE guild_id = $1 AND kind = 'voice' ORDER BY position, id")
+    let member = db::membership(&state.db, guild_id, auth.id).await?.ok_or(ApiError::NotFound)?;
+    let overwrites = db::guild_overwrites(&state.db, guild_id).await?;
+    let channels: Vec<db::ChannelRow> =
+        sqlx::query_as("SELECT * FROM channels WHERE guild_id = $1 AND kind = 'voice' ORDER BY position, id")
             .bind(guild_id.0)
             .fetch_all(&state.db)
             .await?;
+    // Only channels this member can see.
+    let visible: Vec<uuid::Uuid> = channels
+        .iter()
+        .filter(|c| member.in_channel(auth.id, &overwrites, c).allows(Permissions::VIEW_CHANNEL))
+        .map(|c| c.id)
+        .collect();
 
-    let lookups = channels.into_iter().map(|(id,)| {
+    let lookups = visible.into_iter().map(|id| {
         let state = state.clone();
         async move {
             let channel_id = ChannelId(id);
@@ -138,6 +150,8 @@ struct ParticipantInfo {
     identity: String,
     #[serde(default)]
     tracks: Vec<TrackInfo>,
+    #[serde(default)]
+    attributes: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +191,7 @@ async fn list_participants(state: &AppState, channel: ChannelId) -> anyhow::Resu
             Some(VoiceParticipant {
                 user_id,
                 muted: !has("MICROPHONE"),
+                deafened: p.attributes.get(DEAFENED_ATTRIBUTE).is_some_and(|v| v == "1"),
                 camera: has("CAMERA"),
                 screen_sharing: has("SCREEN_SHARE"),
             })

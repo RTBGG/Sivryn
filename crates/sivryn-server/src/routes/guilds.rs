@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -27,29 +29,8 @@ fn validate_name(name: &str) -> ApiResult<String> {
     }
 }
 
-async fn channels_of(state: &AppState, guild: GuildId) -> ApiResult<Vec<Channel>> {
-    let rows: Vec<ChannelRow> = sqlx::query_as("SELECT * FROM channels WHERE guild_id = $1 ORDER BY position, id")
-        .bind(guild.0)
-        .fetch_all(&state.db)
-        .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
-}
-
-async fn categories_of(state: &AppState, guild: GuildId) -> ApiResult<Vec<Category>> {
-    let rows: Vec<CategoryRow> =
-        sqlx::query_as("SELECT * FROM categories WHERE guild_id = $1 ORDER BY position, created_at")
-            .bind(guild.0)
-            .fetch_all(&state.db)
-            .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
-}
-
-async fn my_permissions(state: &AppState, guild: GuildId, user: UserId) -> ApiResult<Permissions> {
-    Ok(db::guild_permissions(&state.db, guild, user).await?.unwrap_or(Permissions::empty()))
-}
-
-/// A guild as one member sees it: channels, categories, permissions and
-/// their own settings there.
+/// A guild as one member sees it: the channels and categories they can see
+/// (with their overwrites), roles, their permissions and their own settings.
 async fn guild_for(state: &AppState, guild: Guild, user: UserId) -> ApiResult<GuildWithChannels> {
     let (nick, level): (Option<String>, String) =
         sqlx::query_as("SELECT nick, notify_level FROM guild_members WHERE guild_id = $1 AND user_id = $2")
@@ -58,12 +39,50 @@ async fn guild_for(state: &AppState, guild: Guild, user: UserId) -> ApiResult<Gu
             .fetch_optional(&state.db)
             .await?
             .unwrap_or((None, "all".into()));
+    let member = db::membership(&state.db, guild.id, user).await?;
+    let overwrites = db::guild_overwrites(&state.db, guild.id).await?;
+    let rows: Vec<ChannelRow> = sqlx::query_as("SELECT * FROM channels WHERE guild_id = $1 ORDER BY position, id")
+        .bind(guild.id.0)
+        .fetch_all(&state.db)
+        .await?;
+    let mut channel_permissions = HashMap::new();
+    let mut channels = Vec::new();
+    for row in rows {
+        let permissions = member.as_ref().map_or(Permissions::empty(), |m| m.in_channel(user, &overwrites, &row));
+        if !permissions.allows(Permissions::VIEW_CHANNEL) {
+            continue;
+        }
+        let mut channel: Channel = row.into();
+        channel.overwrites = overwrites.channels.get(&channel.id).cloned().unwrap_or_default();
+        channel_permissions.insert(channel.id, permissions);
+        channels.push(channel);
+    }
+    let category_rows: Vec<CategoryRow> =
+        sqlx::query_as("SELECT * FROM categories WHERE guild_id = $1 ORDER BY position, created_at")
+            .bind(guild.id.0)
+            .fetch_all(&state.db)
+            .await?;
+    // A category shows up if it's visible itself or holds a visible channel.
+    let categories = category_rows
+        .into_iter()
+        .map(Category::from)
+        .filter(|c| {
+            member.as_ref().is_some_and(|m| m.in_category(user, &overwrites, c.id).allows(Permissions::VIEW_CHANNEL))
+                || channels.iter().any(|ch| ch.category_id == Some(c.id))
+        })
+        .map(|mut c| {
+            c.overwrites = overwrites.categories.get(&c.id).cloned().unwrap_or_default();
+            c
+        })
+        .collect();
     Ok(GuildWithChannels {
-        channels: channels_of(state, guild.id).await?,
-        categories: categories_of(state, guild.id).await?,
-        permissions: my_permissions(state, guild.id, user).await?,
+        channels,
+        categories,
+        permissions: member.as_ref().map_or(Permissions::empty(), |m| m.permissions),
         nick,
         notify_level: NotifyLevel::parse(&level),
+        roles: db::roles(&state.db, guild.id).await?,
+        channel_permissions,
         guild,
     })
 }
@@ -81,7 +100,7 @@ pub async fn get(
     auth: AuthUser,
     Path(guild_id): Path<GuildId>,
 ) -> ApiResult<Json<GuildWithChannels>> {
-    db::require(&state.db, guild_id, auth.id, Permissions::VIEW_CHANNEL).await?;
+    db::require(&state.db, guild_id, auth.id, Permissions::empty()).await?;
     let guild = db::guild(&state.db, guild_id).await?;
     Ok(Json(guild_for(&state, guild, auth.id).await?))
 }
@@ -91,19 +110,22 @@ pub async fn members(
     auth: AuthUser,
     Path(guild_id): Path<GuildId>,
 ) -> ApiResult<Json<Vec<GuildMember>>> {
-    db::require(&state.db, guild_id, auth.id, Permissions::VIEW_CHANNEL).await?;
+    db::require(&state.db, guild_id, auth.id, Permissions::empty()).await?;
     let ids: Vec<(Uuid, Option<String>)> =
         sqlx::query_as("SELECT user_id, nick FROM guild_members WHERE guild_id = $1")
             .bind(guild_id.0)
             .fetch_all(&state.db)
             .await?;
+    let memberships = db::memberships(&state.db, guild_id).await?;
     let users: Vec<UserId> = ids.iter().map(|(id, _)| UserId(*id)).collect();
     let mut out: Vec<GuildMember> = db::users(&state.db, &users)
         .await?
         .into_iter()
         .map(|user| {
             let nick = ids.iter().find(|(id, _)| *id == user.id.0).and_then(|(_, n)| n.clone());
-            GuildMember { user, nick }
+            let roles =
+                memberships.iter().find(|(id, _)| *id == user.id).map(|(_, m)| m.roles.clone()).unwrap_or_default();
+            GuildMember { user, nick, roles }
         })
         .collect();
     out.sort_by_key(|m| m.nick.clone().unwrap_or_else(|| m.user.name().to_owned()).to_lowercase());
@@ -587,6 +609,9 @@ pub async fn remove_member(
         // The owner can neither be kicked nor leave their own server.
         return Err(ApiError::Forbidden);
     }
+    if user_id != auth.id {
+        require_outranks(&state, guild_id, auth.id, user_id).await?;
+    }
     let removed = sqlx::query("DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2")
         .bind(guild_id.0)
         .bind(user_id.0)
@@ -597,6 +622,14 @@ pub async fn remove_member(
     }
     after_member_removed(&state, guild_id, user_id).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Members can only kick or ban members whose highest role is below their own.
+async fn require_outranks(state: &AppState, guild_id: GuildId, actor: UserId, target: UserId) -> ApiResult<()> {
+    let me = db::membership(&state.db, guild_id, actor).await?.ok_or(ApiError::NotFound)?;
+    // Someone who already left can still be banned.
+    let rank = db::membership(&state.db, guild_id, target).await?.map_or(0, |m| m.top_position);
+    if me.outranks(rank) { Ok(()) } else { Err(ApiError::Forbidden) }
 }
 
 /// Tells the guild (and the removed user) and drops the user from its voice channels.
@@ -642,6 +675,7 @@ pub async fn ban(
         return Err(ApiError::Forbidden);
     }
     db::user(&state.db, user_id).await?;
+    require_outranks(&state, guild_id, auth.id, user_id).await?;
     let reason = body.and_then(|b| b.0.reason).map(|r| r.trim().chars().take(500).collect::<String>());
     let mut tx = state.db.begin().await?;
     sqlx::query(
@@ -683,23 +717,14 @@ pub async fn unban(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Everyone who can read a channel: guild members, or the DM's members.
-/// Clients use it to build the channel's MLS group.
+/// Everyone who can read a channel: guild members who can see it, or the
+/// DM's members. Clients use it to build the channel's MLS group.
 pub async fn channel_members(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(channel_id): Path<ChannelId>,
 ) -> ApiResult<Json<Vec<User>>> {
     let channel = db::require_channel(&state.db, channel_id, auth.id, Permissions::VIEW_CHANNEL).await?;
-    let ids: Vec<UserId> = match channel.guild() {
-        Some(guild) => sqlx::query_as::<_, (Uuid,)>("SELECT user_id FROM guild_members WHERE guild_id = $1")
-            .bind(guild.0)
-            .fetch_all(&state.db)
-            .await?
-            .into_iter()
-            .map(|(id,)| UserId(id))
-            .collect(),
-        None => db::channel_member_ids(&state.db, channel_id).await?,
-    };
+    let ids = db::channel_viewers(&state.db, &channel).await?;
     Ok(Json(db::users(&state.db, &ids).await?))
 }

@@ -466,7 +466,9 @@ impl TextInputData {
     ) {
         if self.editor.text() != text {
             self.editor.set_text(text);
-            self.editor.driver(font_ctx, layout_ctx).refresh_layout();
+            // SIVRYN PATCH: like browsers, a value set by the app puts the
+            // caret at the end (typing echoes the same text and skips this).
+            self.editor.driver(font_ctx, layout_ctx).move_to_text_end();
         }
     }
 }

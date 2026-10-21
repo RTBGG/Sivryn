@@ -42,8 +42,17 @@ pub enum CallEvent {
         identity: String,
         sharing: bool,
     },
+    /// A participant turned their sound off or on again.
+    DeafenChanged {
+        identity: String,
+        deafened: bool,
+    },
     Disconnected,
 }
+
+/// Participant attribute set to "1" while someone's sound is off (the server
+/// reads it for the channel list).
+pub const DEAFENED_ATTRIBUTE: &str = "deafened";
 
 /// Remote participants' screen share audio gets its own volume key.
 pub fn screen_volume_key(identity: &str) -> String {
@@ -97,6 +106,9 @@ impl VoiceCall {
         // People already in the room.
         for p in room.remote_participants().values() {
             let _ = tx.send(CallEvent::ParticipantJoined { identity: p.identity().to_string(), name: p.name() });
+            if p.attributes().get(DEAFENED_ATTRIBUTE).is_some_and(|v| v == "1") {
+                let _ = tx.send(CallEvent::DeafenChanged { identity: p.identity().to_string(), deafened: true });
+            }
             for publication in p.track_publications().values() {
                 match publication.source() {
                     TrackSource::Microphone => {
@@ -179,6 +191,13 @@ impl VoiceCall {
                     {
                         CallEvent::MuteChanged { identity: participant.identity().to_string(), muted: false }
                     }
+                    RoomEvent::ParticipantAttributesChanged { participant, changed_attributes } => {
+                        let Some(value) = changed_attributes.get(DEAFENED_ATTRIBUTE) else { continue };
+                        CallEvent::DeafenChanged {
+                            identity: participant.identity().to_string(),
+                            deafened: value == "1",
+                        }
+                    }
                     RoomEvent::ActiveSpeakersChanged { speakers } => CallEvent::SpeakingChanged {
                         speakers: speakers.iter().map(|p| p.identity().to_string()).collect(),
                     },
@@ -225,6 +244,19 @@ impl VoiceCall {
         if let Some(mic) = &self.mic {
             if muted { mic.mute() } else { mic.unmute() }
         }
+    }
+
+    /// Tells the others whether this user's sound is off (in the background;
+    /// must be called inside the Tokio runtime).
+    pub fn set_deafened(&self, deafened: bool) {
+        let room = self.room.clone();
+        tokio::spawn(async move {
+            let mut attributes = room.local_participant().attributes();
+            attributes.insert(DEAFENED_ATTRIBUTE.into(), if deafened { "1" } else { "0" }.into());
+            if let Err(e) = room.local_participant().set_attributes(attributes).await {
+                tracing::debug!(error = %e, "could not announce deafen state");
+            }
+        });
     }
 
     pub fn identity(&self) -> String {

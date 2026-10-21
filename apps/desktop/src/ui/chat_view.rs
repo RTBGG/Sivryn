@@ -19,8 +19,10 @@ use crate::preview::{self, Segment};
 /// Messages from the same author within this window share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 
+/// A channel's messages. `side` is the narrow chat of a voice channel,
+/// shown next to the call.
 #[component]
-pub fn ChatView(channel: ChannelId) -> Element {
+pub fn ChatView(channel: ChannelId, #[props(default)] side: bool) -> Element {
     let mut state = use_context::<AppState>();
 
     // Show the stored history right away, then join the channel's MLS group
@@ -51,7 +53,7 @@ pub fn ChatView(channel: ChannelId) -> Element {
     let kind = info.kind;
     let name = state.channel_name(channel);
     let ready = state.groups_ready.read().contains(&channel);
-    let show_members = state.settings.read().member_list && kind != ChannelKind::Dm;
+    let show_members = !side && state.settings.read().member_list && kind != ChannelKind::Dm;
     let messages = state.messages.read();
     let list = messages.get(&channel).map(Vec::as_slice).unwrap_or_default();
     let compact = state.settings.read().appearance.compact;
@@ -67,7 +69,15 @@ pub fn ChatView(channel: ChannelId) -> Element {
         .flatten();
 
     rsx! {
-        div { class: "chat",
+        div { class: if side { "chat side" } else { "chat" },
+            if side {
+                header { class: "topbar",
+                    span { class: "topbar-icon", Svg { icon: Icon::Message, size: 18 } }
+                    span { class: "topbar-title", "{name}" }
+                    span { class: "topbar-spacer" }
+                    IconButton { icon: Icon::X, size: 18, title: t("channels.close_chat"), onclick: move |_| state.voice_chat.set(false) }
+                }
+            } else {
             header { class: "topbar",
                 span { class: "topbar-icon", Svg { icon, size: 20 } }
                 span {
@@ -87,10 +97,6 @@ pub fn ChatView(channel: ChannelId) -> Element {
                     {t("chat.e2ee")}
                 }
                 span { class: "topbar-spacer" }
-                // A voice channel's chat: back to the call (or join it).
-                if kind == ChannelKind::Voice {
-                    IconButton { icon: Icon::Phone, size: 18, title: t("channels.back_to_call"), onclick: move |_| state.voice_chat.set(false) }
-                }
                 if kind.is_private() {
                     IconButton { icon: Icon::Phone, size: 18, title: t("call.start"), onclick: move |_| call::start(state, channel, false) }
                     IconButton { icon: Icon::Video, size: 18, title: t("call.start_video"), onclick: move |_| call::start(state, channel, true) }
@@ -105,6 +111,7 @@ pub fn ChatView(channel: ChannelId) -> Element {
                         onclick: move |_| state.update_settings(|s| s.member_list = !s.member_list),
                     }
                 }
+            }
             }
             if kind.is_private() {
                 call::DmCall { channel }
@@ -193,21 +200,24 @@ fn ChannelIntro(kind: ChannelKind, name: String, partner: Option<UserId>) -> Ele
 fn reply_preview(state: AppState, list: &[ChatMessage], msg: &ChatMessage) -> Option<(Option<UserId>, String)> {
     let target = msg.content.as_ref()?.reply_to?;
     match list.iter().find(|m| m.id == target) {
-        Some(m) => Some((Some(m.author), excerpt(m))),
+        Some(m) => Some((Some(m.author), excerpt(state, m))),
         // Older than what is loaded: look in the local store.
         None => {
             let stored = state.session.peek().as_ref().and_then(|s| s.store.record(target).ok().flatten());
             match stored.map(|r| fold(&[r])).and_then(|mut m| m.pop()) {
-                Some(m) => Some((Some(m.author), excerpt(&m))),
+                Some(m) => Some((Some(m.author), excerpt(state, &m))),
                 None => Some((None, t("chat.reply_missing").into())),
             }
         }
     }
 }
 
-fn excerpt(m: &ChatMessage) -> String {
+fn excerpt(state: AppState, m: &ChatMessage) -> String {
     let Some(content) = &m.content else { return t("chat.locked").into() };
-    let body: String = content.body.chars().take(90).collect();
+    // Excerpts are shown in the open channel.
+    let guild = state.channel.peek().and_then(|c| state.guild_of(c));
+    let body: String =
+        crate::mentions::plain(&content.body, |token| state.mention_label(guild, token)).chars().take(90).collect();
     if !body.trim().is_empty() {
         body.replace('\n', " ")
     } else if let Some(a) = content.attachments.first() {
@@ -228,6 +238,9 @@ fn MessageView(
     let state = use_context::<AppState>();
     let guild = state.guild_of(channel);
     let author = state.display_name_in(guild, msg.author);
+    // In the color of the author's highest colored role.
+    let author_style =
+        state.role_color(guild, msg.author).map(|c| format!("color: {};", super::roles::hex(c))).unwrap_or_default();
     let time = time_label(msg.created_at);
     let me = state.me();
     let mine = Some(msg.author) == me;
@@ -302,7 +315,7 @@ fn MessageView(
                 {reply_line}
                 div { class: "{class}{highlight}", onmousedown: context,
                     span { class: "msg-time", "{time}" }
-                    span { class: "msg-author", onclick: open_profile, onmousedown: user_menu, "{author}" }
+                    span { class: "msg-author", style: "{author_style}", onclick: open_profile, onmousedown: user_menu, "{author}" }
                     div { class: "msg-content", {body} }
                     {actions}
                 }
@@ -326,7 +339,7 @@ fn MessageView(
             div { class: "msg-content",
                 {reply_line}
                 div { class: "msg-head",
-                    span { class: "msg-author", onclick: open_profile, onmousedown: user_menu, "{author}" }
+                    span { class: "msg-author", style: "{author_style}", onclick: open_profile, onmousedown: user_menu, "{author}" }
                     span { class: "msg-time", "{time}" }
                 }
                 {body}
@@ -355,6 +368,12 @@ fn MessageBody(channel: ChannelId, msg: ChatMessage) -> Element {
                 for (i, segment) in preview::segments(&content.body).into_iter().enumerate() {
                     match segment {
                         Segment::Text(text) => rsx! { span { key: "{i}", "{text}" } },
+                        Segment::Mention(token) => {
+                            let label = state.mention_label(state.guild_of(channel), token);
+                            rsx! {
+                                span { key: "{i}", class: "link mention", onclick: move |_| open_mention(state, token), "{label}" }
+                            }
+                        }
                         Segment::Link(url) => {
                             let url = url.to_owned();
                             let open = url.clone();
@@ -437,11 +456,27 @@ pub fn start_edit(mut state: AppState, channel: ChannelId, message: MessageId) {
         .and_then(|l| l.iter().find(|m| m.id == message))
         .and_then(|m| m.body().map(str::to_owned));
     let Some(body) = body else { return };
+    let guild = state.guild_of(channel);
+    let (draft, picked) = crate::mentions::decode(&body, |token| state.mention_label(guild, token));
     let mut c = state.composer.write();
     let composer = c.entry(channel).or_default();
     composer.reply_to = None;
     composer.editing = Some(message);
-    composer.draft = body;
+    composer.draft = draft;
+    composer.mentions = picked;
+}
+
+/// A click on a mention: the person's profile, the text channel, or (after
+/// asking) the voice channel.
+fn open_mention(mut state: AppState, token: crate::mentions::Token) {
+    match token {
+        crate::mentions::Token::User(id) => state.modal.set(Some(Modal::Profile(id))),
+        crate::mentions::Token::Channel(id) => match state.channel_kind(id) {
+            Some(ChannelKind::Voice) => state.modal.set(Some(Modal::JoinVoice(id))),
+            Some(_) => state.open_channel(id),
+            None => {}
+        },
+    }
 }
 
 /// Adds my reaction, or removes it if I already reacted with this emoji.
@@ -539,7 +574,7 @@ fn send(mut state: AppState, channel: ChannelId) {
     if c.sending {
         return;
     }
-    let body = c.draft.trim().to_owned();
+    let body = crate::mentions::encode(c.draft.trim(), &c.mentions);
     let previews = state.settings.peek().link_previews;
 
     if let Some(target) = c.editing {
@@ -549,6 +584,7 @@ fn send(mut state: AppState, channel: ChannelId) {
             let composer = all.entry(channel).or_default();
             composer.editing = None;
             composer.draft.clear();
+            composer.mentions.clear();
         }
         let Some(original) = original.and_then(|m| m.content) else { return };
         // Emptying a message without attachments means deleting it.
@@ -582,6 +618,7 @@ fn send(mut state: AppState, channel: ChannelId) {
         let mut all = state.composer.write();
         let composer = all.entry(channel).or_default();
         composer.draft.clear();
+        composer.mentions.clear();
         composer.reply_to = None;
         composer.sending = !c.files.is_empty();
     }
@@ -626,10 +663,102 @@ fn last_own_message(state: AppState, channel: ChannelId) -> Option<MessageId> {
     state.messages.peek().get(&channel)?.iter().rev().find(|m| m.author == me && m.content.is_some()).map(|m| m.id)
 }
 
+/// A suggestion while typing `@` or `#`.
+#[derive(Clone, PartialEq)]
+struct Suggestion {
+    /// What goes into the message box, e.g. `@Ann` or `#general`.
+    label: String,
+    token: crate::mentions::Token,
+    /// Account name (people) or nothing.
+    detail: String,
+    user: Option<UserId>,
+    voice: bool,
+}
+
+/// People (for `@`) or channels (for `#`) matching what was typed.
+fn suggestions(state: AppState, channel: ChannelId, trigger: char, typed: &str) -> Vec<Suggestion> {
+    use crate::mentions::Token;
+    let typed = typed.to_lowercase();
+    let guild = state.guild_of(channel);
+    let matches = |name: &str, extra: &str| {
+        typed.is_empty() || name.to_lowercase().contains(&typed) || extra.to_lowercase().contains(&typed)
+    };
+    let mut out: Vec<Suggestion> = Vec::new();
+    if trigger == '@' {
+        let people: Vec<(UserId, String)> = match guild {
+            Some(g) => state
+                .members
+                .read()
+                .get(&g)
+                .map(|l| l.iter().map(|m| (m.user.id, m.user.username.clone())).collect())
+                .unwrap_or_default(),
+            None => state
+                .dm(channel)
+                .map(|d| d.members.iter().map(|u| (u.id, u.username.clone())).collect())
+                .unwrap_or_default(),
+        };
+        for (id, username) in people {
+            let name = state.display_name_in(guild, id);
+            if matches(&name, &username) {
+                out.push(Suggestion {
+                    label: format!("@{name}"),
+                    token: Token::User(id),
+                    detail: format!("@{username}"),
+                    user: Some(id),
+                    voice: false,
+                });
+            }
+        }
+        // Names that start with what was typed first, then alphabetical.
+        out.sort_by_key(|s| (!s.label[1..].to_lowercase().starts_with(&typed), s.label.to_lowercase()));
+    } else if let Some(g) = guild {
+        let channels: Vec<sivryn_client_core::protocol::model::Channel> =
+            state.guilds.read().iter().find(|x| x.guild.id == g).map(|x| x.channels.clone()).unwrap_or_default();
+        for c in channels.into_iter().filter(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Voice)) {
+            if matches(&c.name, "") {
+                out.push(Suggestion {
+                    label: format!("#{}", c.name),
+                    token: Token::Channel(c.id),
+                    detail: String::new(),
+                    user: None,
+                    voice: c.kind == ChannelKind::Voice,
+                });
+            }
+        }
+    }
+    out.truncate(8);
+    out
+}
+
+/// Puts a suggestion in place of what is being typed.
+fn pick_suggestion(mut state: AppState, channel: ChannelId, suggestion: &Suggestion) {
+    let mut all = state.composer.write();
+    let c = all.entry(channel).or_default();
+    let Some((_, _, start)) = crate::mentions::query(&c.draft) else { return };
+    c.draft.truncate(start);
+    c.draft.push_str(&suggestion.label);
+    c.draft.push(' ');
+    if !c.mentions.iter().any(|m| m.label == suggestion.label) {
+        c.mentions.push(crate::mentions::Picked { label: suggestion.label.clone(), token: suggestion.token });
+    }
+}
+
 #[component]
 fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element {
     let mut state = use_context::<AppState>();
     let composer = state.composer.read().get(&channel).cloned().unwrap_or_default();
+    // Suggestions while typing `@` or `#` (Escape hides them for this text).
+    let mut selected = use_signal(|| 0usize);
+    let mut dismissed = use_signal(|| None::<String>);
+    let found = match crate::mentions::query(&composer.draft) {
+        Some((trigger, typed, _)) if dismissed.read().as_deref() != Some(composer.draft.as_str()) => {
+            suggestions(state, channel, trigger, typed)
+        }
+        _ => Vec::new(),
+    };
+    let popup = !found.is_empty();
+    let current = (*selected.read()).min(found.len().saturating_sub(1));
+    let found_for_keys = found.clone();
     let placeholder = match kind {
         ChannelKind::Dm | ChannelKind::Group => format!("{} {name}", t("chat.message_to")),
         _ => format!("{} #{name}", t("chat.message_to")),
@@ -697,6 +826,38 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                     }
                 }
             }
+            if popup {
+                div { class: "mention-popup",
+                    for (i, sug) in found.iter().cloned().enumerate() {
+                        div {
+                            key: "{i}",
+                            class: if i == current { "mention-option active" } else { "mention-option" },
+                            onmousemove: move |_| {
+                                if *selected.peek() != i {
+                                    selected.set(i);
+                                }
+                            },
+                            onclick: {
+                                let sug = sug.clone();
+                                move |_| {
+                                    pick_suggestion(state, channel, &sug);
+                                    selected.set(0);
+                                }
+                            },
+                            match sug.user {
+                                Some(id) => rsx! { Avatar { name: sug.label[1..].to_string(), id: Some(id), size: 24 } },
+                                None => rsx! {
+                                    span { class: "mention-icon",
+                                        if sug.voice { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::Hash, size: 16 } }
+                                    }
+                                },
+                            }
+                            span { class: "mention-label", "{sug.label}" }
+                            span { class: "muted small", "{sug.detail}" }
+                        }
+                    }
+                }
+            }
             div { class: if drag { "composer drop" } else { "composer" },
                 div { class: "composer-button", title: t("chat.attach"), onclick: move |_| pick_files(state, channel),
                     Svg { icon: Icon::CirclePlus, size: 20 }
@@ -707,8 +868,28 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                     input {
                         value: "{composer.draft}",
                         placeholder: "{placeholder}",
-                        oninput: move |e| state.composer.write().entry(channel).or_default().draft = e.value(),
+                        oninput: move |e| {
+                            state.composer.write().entry(channel).or_default().draft = e.value();
+                            selected.set(0);
+                        },
                         onkeydown: move |e| match e.key() {
+                            // With suggestions open, the keys move through and pick them.
+                            Key::ArrowDown if !found_for_keys.is_empty() => {
+                                selected.set((current + 1) % found_for_keys.len());
+                            }
+                            Key::ArrowUp if !found_for_keys.is_empty() => {
+                                selected.set((current + found_for_keys.len() - 1) % found_for_keys.len());
+                            }
+                            Key::Enter | Key::Tab if !found_for_keys.is_empty() => {
+                                if let Some(sug) = found_for_keys.get(current) {
+                                    pick_suggestion(state, channel, sug);
+                                }
+                                selected.set(0);
+                            }
+                            Key::Escape if !found_for_keys.is_empty() => {
+                                let draft = state.composer.peek().get(&channel).map(|c| c.draft.clone());
+                                dismissed.set(draft);
+                            }
                             Key::Enter => send(state, channel),
                             Key::Escape => cancel(),
                             Key::ArrowUp => {
@@ -738,7 +919,7 @@ pub fn ConfirmDelete(channel: ChannelId, message: MessageId) -> Element {
         .messages
         .read()
         .get(&channel)
-        .and_then(|l| l.iter().find(|m| m.id == message).map(excerpt))
+        .and_then(|l| l.iter().find(|m| m.id == message).map(|m| excerpt(state, m)))
         .unwrap_or_default();
     rsx! {
         div { class: "overlay", onclick: move |_| state.modal.set(None),

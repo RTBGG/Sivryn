@@ -114,6 +114,16 @@ pub enum Event {
     },
     /// Your mutes or notification levels changed on another device.
     NotificationSettingsChanged,
+    /// Roles or permission overwrites changed, so who may read which
+    /// channels may have too. Devices in a channel's MLS group add or remove
+    /// members to match.
+    ChannelAccessChanged {
+        guild_id: GuildId,
+    },
+    /// Someone moved you to another voice channel: switch the call there.
+    VoiceMove {
+        channel_id: ChannelId,
+    },
 }
 
 /// Who receives an event.

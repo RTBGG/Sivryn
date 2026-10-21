@@ -22,11 +22,13 @@ your GPU can encode it, and limits that you as the admin control.
 - **End-to-end encryption.** Text channels use MLS (RFC 9420). Voice and video can be
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
 - **Familiar model:** servers (guilds) with categories, text and voice channels (voice channels
-  have their own chat), roles, permissions, invites, bans, an AFK channel and a server-wide audio
-  bitrate (64 to 320 kbit/s). Profiles with picture, banner, description, status (online, away,
+  have their own chat), roles with colors and a hierarchy, permissions per server and per
+  channel or category (private channels), invites, bans, an AFK channel and a server-wide audio
+  bitrate (64 to 320 kbit/s). Channels, categories and people in voice can be rearranged by drag
+  and drop. Profiles with picture, banner, description, status (online, away,
   busy, invisible) and a name per server. Unread counts, muting channels and Windows
   notifications (all messages or only mentions, per server). Friends, direct messages and group chats with voice, video and screen
-  sharing. Replies, edits, reactions, emoji, link previews and files (images, GIFs, videos with
+  sharing. Replies, edits, reactions, emoji, @mentions of people and #channels, link previews and files (images, GIFs, videos with
   an inline player), all end-to-end encrypted.
 - **Easy to self-host:** Docker Compose with automatic HTTPS via Caddy, PostgreSQL and LiveKit.
   Media runs on two ports.
@@ -150,6 +152,7 @@ build the image itself.
 - [ ] Verify across real networks (NAT, TURN) with several people
 - [x] Friends, DMs and group calls, replies, edits, reactions, emoji, encrypted files and link previews
 - [x] Categories, voice channel chat, profiles and statuses, unread counts, notifications, muting
+- [x] Roles and channel permissions, drag and drop, image cropping, video posters
 - [ ] OIDC login, rate limiting, search
 - [ ] Linux and macOS clients, browser client, mobile
 

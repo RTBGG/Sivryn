@@ -142,6 +142,7 @@ pub struct BaseDocument {
     /// Whether there are active CSS animations/transitions (so we should re-render every frame)
     pub(crate) has_active_animations: bool,
     /// Whether there is a <canvas> element in the DOM (so we should re-render every frame)
+    #[allow(dead_code)]
     pub(crate) has_canvas: bool,
 
     /// Map of node ID's for fast lookups
@@ -1057,8 +1058,12 @@ impl BaseDocument {
         &mut self.devtool_settings
     }
 
+    /// Sivryn patch: canvases no longer count as animating (that repainted
+    /// the window at full refresh rate while any canvas existed); their
+    /// sources request a repaint when they have a new frame
+    /// (`blitz_shell::canvas_frames`).
     pub fn is_animating(&self) -> bool {
-        self.has_canvas | self.has_active_animations
+        self.has_active_animations
     }
 
     /// Update the device and reset the stylist to process the new size

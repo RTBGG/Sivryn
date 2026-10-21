@@ -9,6 +9,7 @@ mod emoji;
 mod files;
 mod hotkeys;
 mod i18n;
+mod mentions;
 mod messages;
 mod notify;
 mod preview;

@@ -222,6 +222,9 @@ impl BlitzDomPainter<'_> {
         cx.draw_background(scene);
         cx.draw_border(scene);
 
+        // Sivryn patch: the scroll bar sits on top of the content, unscrolled.
+        let unscrolled = cx.transform;
+
         // TODO: allow layers with opacity to be unclipped (overflow: visible)
         let wants_layer = should_clip | has_opacity;
         let clip = &cx.frame.padding_box_path();
@@ -254,6 +257,22 @@ impl BlitzDomPainter<'_> {
             cx.draw_marker(scene, content_position);
             cx.draw_children(scene);
         });
+
+        if let Some(bar) = blitz_dom::scrollbar::vertical(node) {
+            let alpha = if blitz_dom::scrollbar::is_highlighted(node_id) { 190 } else { 110 };
+            let s = self.scale;
+            let width = blitz_dom::scrollbar::THUMB_WIDTH as f64;
+            let thumb = kurbo::RoundedRect::new(
+                bar.left as f64 * s,
+                bar.thumb_top as f64 * s,
+                (bar.left as f64 + width) * s,
+                (bar.thumb_top + bar.thumb_len) as f64 * s,
+                width / 2.0 * s,
+            );
+            // A grey that reads on light and dark backgrounds alike.
+            let color = peniko::Color::from_rgba8(128, 132, 145, alpha);
+            scene.fill(Fill::NonZero, unscrolled, color, None, &thumb);
+        }
     }
 
     fn render_node(&self, scene: &mut impl PaintScene, node_id: usize, location: Point) {

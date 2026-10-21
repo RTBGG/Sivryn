@@ -2,11 +2,13 @@
 
 use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
-use sivryn_client_core::protocol::UserId;
 use sivryn_client_core::protocol::api::{Relationship, UserProfile};
+use sivryn_client_core::protocol::permissions::Permissions;
+use sivryn_client_core::protocol::{GuildId, RoleId, UserId};
 
 use super::AppState;
 use super::icons::{Icon, Svg};
+use super::roles::hex;
 use super::widgets::{Avatar, IconButton, RemoteImage, StatusDot};
 use crate::i18n::t;
 
@@ -54,7 +56,7 @@ pub fn ProfileDialog(user: UserId) -> Element {
     let bio = p.bio.clone();
     let banner = p.banner_id;
     let since = p.user.created_at.with_timezone(&chrono::Local).format("%d.%m.%Y").to_string();
-    let guilds: Vec<String> = p.mutual_guilds.iter().filter_map(|g| state.guild(*g)).map(|g| g.name).collect();
+    let guilds: Vec<_> = p.mutual_guilds.iter().filter_map(|g| state.guild(*g)).collect();
     let api = move |action: Action| {
         let Some(s) = state.session.cloned() else { return };
         spawn_forever(async move {
@@ -76,12 +78,12 @@ pub fn ProfileDialog(user: UserId) -> Element {
             div { class: "dialog profile", onclick: move |e| e.stop_propagation(),
                 div { class: "profile-banner",
                     for file in banner.iter() {
-                        RemoteImage { key: "{file}", file: *file, size: 800 }
+                        RemoteImage { key: "{file}", file: *file, size: 800, animate: true, cover: true }
                     }
                 }
                 div { class: "profile-head",
                     div { class: "profile-avatar",
-                        Avatar { name: name.clone(), id: Some(user), size: 84 }
+                        Avatar { name: name.clone(), id: Some(user), size: 84, animate: true }
                         StatusDot { status, class: "large" }
                     }
                     IconButton { icon: Icon::X, size: 18, onclick: close }
@@ -102,6 +104,9 @@ pub fn ProfileDialog(user: UserId) -> Element {
                         div { class: "profile-bio selectable", "{bio}" }
                     }
                 }
+                if let Some(g) = guild.filter(|g| state.members.read().get(g).is_some_and(|l| l.iter().any(|m| m.user.id == user))) {
+                    RoleChips { guild: g, user }
+                }
                 div { class: "profile-section",
                     div { class: "field-label", {t("profile.member_since")} }
                     div { "{since}" }
@@ -109,7 +114,28 @@ pub fn ProfileDialog(user: UserId) -> Element {
                 if !guilds.is_empty() {
                     div { class: "profile-section",
                         div { class: "field-label", {t("profile.mutual_servers")} }
-                        div { "{guilds.join(\", \")}" }
+                        // Up to three rows, then it scrolls.
+                        div { class: "mutual-guilds",
+                            for g in guilds {
+                                {
+                                    let id = g.id;
+                                    rsx! {
+                                        div {
+                                            key: "{id}",
+                                            class: "mutual-guild",
+                                            onclick: move |_| {
+                                                state.modal.set(None);
+                                                super::shell::select_guild(state, id);
+                                            },
+                                            div { class: "mutual-guild-icon",
+                                                super::guild_settings::GuildIcon { name: g.name.clone(), icon: g.icon_id, size: 28 }
+                                            }
+                                            span { class: "mutual-guild-name", "{g.name}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if me {
@@ -178,6 +204,84 @@ pub fn ProfileDialog(user: UserId) -> Element {
                             button { class: "button danger-ghost", onclick: move |_| api(Action::Block),
                                 Svg { icon: Icon::Ban, size: 16 }
                                 {t("menu.block")}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A member's roles in a guild as colored chips; members who may manage
+/// roles can take them away (×) and add more (+).
+#[component]
+fn RoleChips(guild: GuildId, user: UserId) -> Element {
+    let state = use_context::<AppState>();
+    let mut adding = use_signal(|| false);
+    let roles = state.roles(guild);
+    let has = state.member_roles(guild, user);
+    let can_manage = state.permissions(guild).allows(Permissions::MANAGE_ROLES);
+    let held: Vec<_> = roles.iter().filter(|r| has.contains(&r.id)).cloned().collect();
+    let addable: Vec<_> = roles
+        .iter()
+        .filter(|r| !r.is_everyone && !has.contains(&r.id) && can_manage && state.outranks(guild, r.position))
+        .cloned()
+        .collect();
+    if held.is_empty() && addable.is_empty() {
+        return rsx! {};
+    }
+    let set = move |role: RoleId, add: bool| {
+        let Some(s) = state.session.cloned() else { return };
+        spawn_forever(async move {
+            state.report(s.api.set_member_role(guild, user, role, add).await.map_err(|e| e.to_string()));
+            state.report(state.refresh().await);
+        });
+    };
+    let dot = |c: Option<u32>| format!("background: {};", c.map(hex).unwrap_or_else(|| "#99aab5".into()));
+    rsx! {
+        div { class: "profile-section",
+            div { class: "field-label", {t("roles.title")} }
+            div { class: "role-chips",
+                for r in held {
+                    {
+                        let id = r.id;
+                        let removable = can_manage && state.outranks(guild, r.position);
+                        rsx! {
+                            div { key: "{id}", class: "role-chip",
+                                if removable {
+                                    div { class: "role-chip-dot removable", style: "{dot(r.color)}", title: t("roles.remove_member"),
+                                        onclick: move |_| set(id, false),
+                                        Svg { icon: Icon::X, size: 10 }
+                                    }
+                                } else {
+                                    div { class: "role-chip-dot", style: "{dot(r.color)}" }
+                                }
+                                span { "{r.name}" }
+                            }
+                        }
+                    }
+                }
+                if !addable.is_empty() {
+                    div { class: "role-chip add", title: t("roles.add_role"), onclick: move |_| adding.toggle(),
+                        Svg { icon: Icon::Plus, size: 12 }
+                    }
+                }
+            }
+            if *adding.read() {
+                div { class: "role-add-list",
+                    for r in addable {
+                        {
+                            let id = r.id;
+                            rsx! {
+                                div { key: "{id}", class: "role-item",
+                                    onclick: move |_| {
+                                        adding.set(false);
+                                        set(id, true);
+                                    },
+                                    span { class: "role-dot", style: "{dot(r.color)}" }
+                                    span { class: "role-item-name", "{r.name}" }
+                                }
                             }
                         }
                     }

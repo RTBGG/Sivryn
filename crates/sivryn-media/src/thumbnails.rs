@@ -66,7 +66,8 @@ fn run(sources: Vec<(ScreenSource, watch::Sender<Option<Arc<RgbaFrame>>>)>, stop
         let Some(target) = capturer.get_source_list().into_iter().find(|s| s.id() == source.id) else { continue };
         capturer.start_capture(Some(target), move |result| {
             if let Ok(frame) = result
-                && let Some(thumb) = downscale(frame.data(), frame.stride() as usize, frame.width(), frame.height())
+                && let Some(thumb) =
+                    downscale(frame.data(), frame.stride() as usize, frame.width(), frame.height(), THUMB_EDGE)
             {
                 let _ = tx.send(Some(Arc::new(thumb)));
             }
@@ -89,14 +90,14 @@ fn run(sources: Vec<(ScreenSource, watch::Sender<Option<Arc<RgbaFrame>>>)>, stop
     }
 }
 
-/// Box-filters a BGRA desktop frame down to at most [`THUMB_EDGE`] pixels on
-/// its longest edge, as RGBA.
-fn downscale(data: &[u8], stride: usize, width: i32, height: i32) -> Option<RgbaFrame> {
+/// Box-filters a BGRA desktop frame down to at most `edge` pixels on its
+/// longest edge, as RGBA.
+pub(crate) fn downscale(data: &[u8], stride: usize, width: i32, height: i32, edge: u32) -> Option<RgbaFrame> {
     if width <= 0 || height <= 0 {
         return None;
     }
     let (w, h) = (width as u32, height as u32);
-    let scale = (THUMB_EDGE as f64 / w.max(h) as f64).min(1.0);
+    let scale = (edge as f64 / w.max(h) as f64).min(1.0);
     let (tw, th) = (((w as f64 * scale) as u32).max(1), ((h as f64 * scale) as u32).max(1));
     let mut out = vec![0u8; (tw * th * 4) as usize];
     for ty in 0..th {
@@ -137,12 +138,12 @@ mod tests {
         // 800×400 BGRA, pure blue.
         let (w, h) = (800, 400);
         let data: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();
-        let thumb = downscale(&data, w * 4, w as i32, h as i32).unwrap();
+        let thumb = downscale(&data, w * 4, w as i32, h as i32, THUMB_EDGE).unwrap();
         assert_eq!((thumb.width, thumb.height), (400, 200));
         assert_eq!(&thumb.data[..4], &[0, 0, 255, 255]);
-        assert!(downscale(&[], 0, 0, 0).is_none());
+        assert!(downscale(&[], 0, 0, 0, THUMB_EDGE).is_none());
         // Small sources aren't enlarged.
         let tiny: Vec<u8> = vec![0; 10 * 10 * 4];
-        assert_eq!(downscale(&tiny, 40, 10, 10).unwrap().width, 10);
+        assert_eq!(downscale(&tiny, 40, 10, 10, THUMB_EDGE).unwrap().width, 10);
     }
 }

@@ -3,7 +3,10 @@ use style::values::computed::ui::CursorKind as StyloCursorKind;
 
 pub(crate) fn stylo_to_cursor_icon(cursor: StyloCursorKind) -> CursorIcon {
     match cursor {
-        StyloCursorKind::None => todo!("set the cursor to none"),
+        // SIVRYN PATCH: upstream panicked here (`todo!`), which crashed the app
+        // on any `cursor: none`. Hiding needs the window (see blitz-shell's
+        // fullscreen.rs); here it falls back to the default pointer.
+        StyloCursorKind::None => CursorIcon::Default,
         StyloCursorKind::Default => CursorIcon::Default,
         StyloCursorKind::Pointer => CursorIcon::Pointer,
         StyloCursorKind::ContextMenu => CursorIcon::ContextMenu,

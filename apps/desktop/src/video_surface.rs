@@ -33,9 +33,41 @@ fn vs(@builtin(vertex_index) index: u32) -> VertexOut {
     return out;
 }
 
+// Area scaling: every output pixel averages the source texels it covers,
+// weighted by how much of each it covers. Shrinking stays sharp without
+// shimmering, enlarging keeps hard texel edges with smoothed transitions.
+const MAX_TAPS: i32 = 16;
+
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
-    return textureSample(frame, frame_sampler, in.uv);
+    let size = textureDimensions(frame);
+    let dims = vec2<f32>(size);
+    let last = vec2<i32>(size) - vec2(1);
+    let centre = in.uv * dims;
+    // The output pixel's footprint in texels.
+    let half = max(vec2(abs(dpdx(centre.x)), abs(dpdy(centre.y))), vec2(1e-3)) * 0.5;
+    let lo = centre - half;
+    let hi = centre + half;
+    let first = vec2<i32>(floor(lo));
+    let end = vec2<i32>(ceil(hi));
+    // Very large reductions sample blocks instead of every texel.
+    let step = max(vec2(1), (end - first + vec2(MAX_TAPS - 1)) / MAX_TAPS);
+
+    var sum = vec4(0.0);
+    var total = 0.0;
+    for (var y = first.y; y < end.y; y += step.y) {
+        let wy = min(hi.y, f32(y + step.y)) - max(lo.y, f32(y));
+        for (var x = first.x; x < end.x; x += step.x) {
+            let wx = min(hi.x, f32(x + step.x)) - max(lo.x, f32(x));
+            let w = max(wx, 0.0) * max(wy, 0.0);
+            sum += textureLoad(frame, clamp(vec2(x, y), vec2(0), last), 0) * w;
+            total += w;
+        }
+    }
+    if total <= 0.0 {
+        return textureLoad(frame, clamp(vec2<i32>(centre), vec2(0), last), 0);
+    }
+    return sum / total;
 }
 "#;
 
@@ -43,11 +75,36 @@ pub struct VideoSurface {
     frames: watch::Receiver<Option<Arc<RgbaFrame>>>,
     gpu: Option<Gpu>,
     logged_first_render: bool,
+    /// Fill the canvas and crop the overflow instead of letterboxing.
+    cover: bool,
+    /// Asks the window to repaint whenever a new frame arrives.
+    repaint: tokio::task::JoinHandle<()>,
 }
 
 impl VideoSurface {
     pub fn new(frames: watch::Receiver<Option<Arc<RgbaFrame>>>) -> Self {
-        Self { frames, gpu: None, logged_first_render: false }
+        // The window only repaints when something changed: a new frame is a change.
+        let mut watched = frames.clone();
+        let repaint = tokio::spawn(async move {
+            blitz_shell::canvas_frames::request_frame();
+            while watched.changed().await.is_ok() {
+                blitz_shell::canvas_frames::request_frame();
+            }
+        });
+        Self { frames, gpu: None, logged_first_render: false, cover: false, repaint }
+    }
+
+    /// Fills the canvas, cropping what doesn't fit (banners: rounding in
+    /// the layout must not leave thin bars at the edges).
+    pub fn cover(mut self) -> Self {
+        self.cover = true;
+        self
+    }
+}
+
+impl Drop for VideoSurface {
+    fn drop(&mut self) {
+        self.repaint.abort();
     }
 }
 
@@ -204,13 +261,20 @@ impl Gpu {
         self.dirty = true;
     }
 
-    fn draw(&mut self) {
+    fn draw(&mut self, cover: bool) {
         let (Some((frame, bind_group)), Some(output)) = (&self.frame, &self.output) else { return };
 
-        // Letterbox: fit the frame into the canvas, keeping its aspect ratio.
+        // Letterbox: fit the frame into the canvas, keeping its aspect ratio
+        // (or cover it, and what lies outside the canvas is clipped).
         let canvas_aspect = output.width as f32 / output.height as f32;
         let frame_aspect = frame.width() as f32 / frame.height() as f32;
-        let (sx, sy) = if frame_aspect > canvas_aspect {
+        let (sx, sy) = if cover {
+            if frame_aspect > canvas_aspect {
+                (frame_aspect / canvas_aspect, 1.0)
+            } else {
+                (1.0, canvas_aspect / frame_aspect)
+            }
+        } else if frame_aspect > canvas_aspect {
             (1.0, canvas_aspect / frame_aspect)
         } else {
             (frame_aspect / canvas_aspect, 1.0)
@@ -251,6 +315,8 @@ impl Gpu {
 impl CustomPaintSource for VideoSurface {
     fn resume(&mut self, device_handle: &DeviceHandle) {
         self.gpu = Some(Gpu::new(&device_handle.device, &device_handle.queue));
+        // The first render may have happened before the GPU side existed.
+        blitz_shell::canvas_frames::request_frame();
     }
 
     fn suspend(&mut self) {
@@ -300,8 +366,19 @@ impl CustomPaintSource for VideoSurface {
         }
 
         if gpu.dirty {
-            gpu.draw();
+            gpu.draw(self.cover);
         }
         gpu.output.as_ref().map(|o| o.handle.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shader_is_valid() {
+        let module = naga::front::wgsl::parse_str(super::SHADER).expect("shader parses");
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+            .validate(&module)
+            .expect("shader validates");
     }
 }
