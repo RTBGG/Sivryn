@@ -588,10 +588,12 @@ pub fn ScreenPicker() -> Element {
                         {t("share.windows")}
                     }
                 }
+                // The empty case outside the grid: Blitz counted the empty
+                // placeholder as a grid item, which shifted the first row.
+                if shown.is_empty() {
+                    div { class: "share-grid muted", {t("share.none")} }
+                }
                 div { class: "share-grid",
-                    if shown.is_empty() {
-                        div { class: "muted", {t("share.none")} }
-                    }
                     for source in shown {
                         {
                             let thumb = previews.frames.get(&source.id).cloned();

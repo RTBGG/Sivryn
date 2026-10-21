@@ -53,6 +53,9 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/escape.rs`, `src/window.rs`: Escape goes to an app handler first
   (`blitz_shell::escape::set_escape_handler`). Key events only reach the focused element, so
   overlays without a focused child (image viewer, settings) never saw Escape.
+- `src/window.rs` (`View::redraw`): nothing is drawn while the window is minimized. Its size is
+  0×0 then, and drawing to the surface panicked ("failed to get surface texture: Outdated"),
+  which closed the app on minimize.
 
 ## sonora-agc2 0.2.0 and sonora-common-audio 0.2.0
 

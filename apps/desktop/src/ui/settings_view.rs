@@ -51,22 +51,25 @@ pub fn SettingsView() -> Element {
                     }
                 }
             }
-            div { class: "settings-body",
-                div { class: "settings-content",
-                    match page {
-                        SettingsPage::Account => rsx! { AccountPage {} },
-                        SettingsPage::Privacy => rsx! { PrivacyPage {} },
-                        SettingsPage::Voice => rsx! { VoicePage {} },
-                        SettingsPage::Video => rsx! { VideoPage {} },
-                        SettingsPage::Keybinds => rsx! { KeybindsPage {} },
-                        SettingsPage::Appearance => rsx! { AppearancePage {} },
-                        SettingsPage::Notifications => rsx! { NotificationsPage {} },
-                        SettingsPage::About => rsx! { AboutPage {} },
+            // One scroll position per page: keyed, so switching pages starts at the top.
+            for p in [page] {
+                div { key: "{p:?}", class: "settings-body",
+                    div { class: "settings-content",
+                        match page {
+                            SettingsPage::Account => rsx! { AccountPage {} },
+                            SettingsPage::Privacy => rsx! { PrivacyPage {} },
+                            SettingsPage::Voice => rsx! { VoicePage {} },
+                            SettingsPage::Video => rsx! { VideoPage {} },
+                            SettingsPage::Keybinds => rsx! { KeybindsPage {} },
+                            SettingsPage::Appearance => rsx! { AppearancePage {} },
+                            SettingsPage::Notifications => rsx! { NotificationsPage {} },
+                            SettingsPage::About => rsx! { AboutPage {} },
+                        }
                     }
-                }
-                div { class: "settings-close",
-                    IconButton { icon: Icon::X, class: "outlined", onclick: move |_| state.settings_page.set(None) }
-                    span { "ESC" }
+                    div { class: "settings-close",
+                        IconButton { icon: Icon::X, class: "outlined", onclick: move |_| state.settings_page.set(None) }
+                        span { "ESC" }
+                    }
                 }
             }
         }

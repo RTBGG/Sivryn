@@ -477,7 +477,7 @@ h1, h2, h3 { margin: 0; }
   padding: 0 8px 0 10px;
   background: var(--bg-0);
 }
-.user-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.user-info { display: flex; flex-grow: 1; align-items: center; gap: 10px; min-width: 0; margin-right: 6px; }
 .user-text { min-width: 0; }
 .user-name { font-size: 0.9rem; font-weight: 700; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .user-status { display: flex; align-items: center; color: var(--text-3); font-size: 0.75rem; }
@@ -772,7 +772,7 @@ h1, h2, h3 { margin: 0; }
 .nav-item:hover { background: var(--bg-hover); color: var(--text); }
 .nav-item.active { background: var(--bg-active); color: var(--text); }
 .settings-body { position: relative; display: flex; flex-grow: 1; min-width: 0; overflow-y: auto; }
-.settings-content { flex-grow: 1; max-width: 760px; padding: 48px 48px 64px; }
+.settings-content { flex-grow: 1; align-self: flex-start; max-width: 760px; padding: 48px 48px 96px; }
 .settings-close {
   display: flex;
   flex-direction: column;
@@ -1544,9 +1544,9 @@ h1, h2, h3 { margin: 0; }
 .dialog.share-dialog { width: 780px; }
 .share-tabs { display: flex; gap: 6px; }
 .share-grid {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
   gap: 12px;
   min-height: 160px;
   max-height: 380px;
@@ -1554,7 +1554,7 @@ h1, h2, h3 { margin: 0; }
   overflow-y: auto;
 }
 .share-card {
-  width: 234px;
+  min-width: 0;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 12px;

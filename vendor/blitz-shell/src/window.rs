@@ -257,6 +257,11 @@ impl<Rend: WindowRenderer> View<Rend> {
         let animation_time = self.current_animation_time();
         self.doc.resolve(animation_time);
         let (width, height) = self.doc.viewport().window_size;
+        // Sivryn patch: a minimized window is 0×0 and its surface can't be
+        // drawn to (wgpu panicked with "failed to get surface texture: Outdated").
+        if width == 0 || height == 0 || self.window.is_minimized() == Some(true) {
+            return;
+        }
         let scale = self.doc.viewport().scale_f64();
         self.renderer
             .render(|scene| paint_scene(scene, &self.doc, scale, width, height));

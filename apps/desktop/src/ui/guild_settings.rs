@@ -12,7 +12,7 @@ use super::icons::{Icon, Svg};
 use super::widgets::{Avatar, IconButton, Select, opt};
 use crate::i18n::t;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Overview,
     Bans,
@@ -50,16 +50,19 @@ pub fn GuildSettings(guild: GuildId) -> Element {
                     }
                 }
             }
-            div { class: "settings-body",
-                div { class: "settings-content",
-                    match current {
-                        Page::Overview => rsx! { Overview { guild } },
-                        Page::Bans => rsx! { Bans { guild } },
+            // Keyed per page, so switching pages starts at the top.
+            for p in [current] {
+                div { key: "{p:?}", class: "settings-body",
+                    div { class: "settings-content",
+                        match p {
+                            Page::Overview => rsx! { Overview { guild } },
+                            Page::Bans => rsx! { Bans { guild } },
+                        }
                     }
-                }
-                div { class: "settings-close",
-                    IconButton { icon: Icon::X, class: "outlined", onclick: move |_| state.modal.set(None) }
-                    span { "ESC" }
+                    div { class: "settings-close",
+                        IconButton { icon: Icon::X, class: "outlined", onclick: move |_| state.modal.set(None) }
+                        span { "ESC" }
+                    }
                 }
             }
         }
