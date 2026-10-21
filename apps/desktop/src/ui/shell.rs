@@ -43,6 +43,7 @@ pub fn Shell() -> Element {
                 if *state.connection.read() == Connection::Offline {
                     div { class: "offline-bar", {t("shell.offline")} }
                 }
+                super::updates::UpdateBar {}
                 match channel.and_then(|c| state.channel_kind(c)) {
                     Some(ChannelKind::Voice) => rsx! { call::VoiceArea { channel: channel.unwrap() } },
                     Some(_) => rsx! { chat_view::ChatView { key: "{channel.unwrap()}", channel: channel.unwrap() } },

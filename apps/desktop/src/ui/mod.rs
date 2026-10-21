@@ -50,6 +50,7 @@ mod resize;
 mod roles;
 mod settings_view;
 mod shell;
+mod updates;
 pub mod widgets;
 
 pub use menu::{ContextMenu, MenuItem};
@@ -269,6 +270,8 @@ pub struct AppState {
     pub active_video: Signal<u64>,
     /// A video or stream shown over the whole screen.
     pub full_view: Signal<Option<fullscreen::FullView>>,
+    /// Looking for, downloading or holding an update.
+    pub update: Signal<updates::UpdateState>,
     /// A picked image being cropped (avatar, banner, server icon).
     pub crop: Signal<Option<crop::CropRequest>>,
     /// Bumped when the own profile images changed, so editors reload them.
@@ -1221,6 +1224,7 @@ pub fn App() -> Element {
             crop: root(None),
             active_video: root(0),
             full_view: root(None),
+            update: root(Default::default()),
             profile_rev: root(0),
             ringing: root(None),
             muted: root(false),
@@ -1359,6 +1363,8 @@ pub fn App() -> Element {
             || state.settings_page.read().is_some();
         ESCAPABLE.store(open, std::sync::atomic::Ordering::Relaxed);
     });
+
+    use_hook(move || updates::start(state));
 
     // Apply settings whenever they change.
     use_effect(move || {

@@ -127,11 +127,19 @@ git tag -a v0.1.0-alpha.2 -m "Sivryn v0.1.0-alpha.2"
 git push origin v0.1.0-alpha.2
 ```
 
-It attaches `sivryn-desktop-<tag>-windows-x64.exe` and `SHA256SUMS.txt` to the GitHub release
+It attaches the installer (`Sivryn.Desktop-win-Setup.exe`), the update packages and feed,
+a portable `sivryn-desktop-<tag>-windows-x64.exe` and `SHA256SUMS.txt` to the GitHub release
 and pushes the server image to `ghcr.io/rtbgg/sivryn-server:<version>`. Tags with a suffix such
 as `-alpha.2` become pre-releases and don't update the image's `latest` tag. If you want custom
 release notes, create the release on GitHub before pushing the tag; the workflow then only adds
 the files. Otherwise it generates notes from the commits.
+
+Installed clients update themselves from these releases (pre-releases included) through
+[Velopack](https://velopack.io): they check at start and every six hours, download in the
+background and install at the next start or when the user restarts from the app. Every release
+feed is signed with an Ed25519 key; the client only accepts feeds that verify against the public
+key in `apps/desktop/src/updater.rs`. The private key (PEM) lives in the repository secret
+`UPDATE_SIGNING_KEY`; without it the release job fails rather than publish unsigned updates.
 
 The GHCR package is private after its first push. Make it public once under
 *Package settings → Change visibility* so servers can pull it without logging in. Until there is

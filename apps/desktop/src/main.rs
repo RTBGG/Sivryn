@@ -17,6 +17,7 @@ mod session;
 mod settings;
 mod store;
 mod ui;
+mod updater;
 mod video_surface;
 mod window;
 
@@ -24,6 +25,8 @@ use dioxus_native::{LogicalSize, WindowAttributes};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    // Velopack's install and update hooks exit the process in here.
+    updater::run_hooks();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -31,6 +34,8 @@ fn main() {
         )
         .init();
     install_crash_log();
+    // An update downloaded in an earlier session: install it and restart.
+    updater::apply_pending();
     sivryn_client_core::install_crypto_provider();
     ui::register_fonts();
 

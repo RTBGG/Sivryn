@@ -2067,3 +2067,19 @@ h1, h2, h3 { margin: 0; }
   font-weight: 600;
   text-align: center;
 }
+
+/* --- Updates ------------------------------------------------------------------------- */
+.update-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.update-bar .button { background: #ffffff; color: var(--accent); }
+.update-bar .link { color: #ffffff; opacity: 0.85; }
+.update-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 12px; background: var(--bg-2); }

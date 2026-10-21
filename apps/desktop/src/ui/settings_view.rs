@@ -91,7 +91,12 @@ fn Field(label: String, #[props(default)] hint: Option<String>, children: Elemen
 }
 
 #[component]
-fn ToggleRow(label: String, #[props(default)] hint: Option<String>, on: bool, onchange: EventHandler<bool>) -> Element {
+pub(super) fn ToggleRow(
+    label: String,
+    #[props(default)] hint: Option<String>,
+    on: bool,
+    onchange: EventHandler<bool>,
+) -> Element {
     rsx! {
         div { class: "toggle-row",
             div {
@@ -860,6 +865,7 @@ fn NotificationsPage() -> Element {
 #[component]
 fn AboutPage() -> Element {
     let hw = use_hook(HardwareEncoders::detect);
+    let version = use_hook(crate::updater::current_version);
     let yes_no = |b: bool| if b { t("common.yes") } else { t("common.no") };
     rsx! {
         h1 { class: "section-title", {t("settings.about")} }
@@ -867,9 +873,10 @@ fn AboutPage() -> Element {
             super::icons::Logo { size: 56 }
             div {
                 div { class: "account-name", "Sivryn" }
-                div { class: "muted", "Version {env!(\"CARGO_PKG_VERSION\")} · AGPL-3.0" }
+                div { class: "muted", "Version {version} · AGPL-3.0" }
             }
         }
+        super::updates::UpdateSection {}
         h2 { class: "subsection", {t("about.media")} }
         div { class: "info-grid",
             div { class: "info-label", "AV1 (GPU)" }

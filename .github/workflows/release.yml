@@ -33,6 +33,43 @@ jobs:
           cp target/release/sivryn-desktop.exe "dist/$name"
           (cd dist && sha256sum "$name" > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
+      # Installer and updates (apps/desktop/src/updater.rs). vpk must match the
+      # velopack crate's version.
+      - name: Installer and update packages (Velopack)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [[ -z "$UPDATE_SIGNING_KEY" ]]; then
+            echo "::error::The UPDATE_SIGNING_KEY secret is missing; clients only take signed updates."
+            exit 1
+          fi
+          dotnet tool install -g vpk --version 1.2.161
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          version="${GITHUB_REF_NAME#v}"
+          mkdir publish releases
+          cp target/release/sivryn-desktop.exe publish/
+          # The previous release's package, so this one gets a small delta update.
+          vpk download github --repoUrl "https://github.com/${GITHUB_REPOSITORY}" --pre \
+            --token "$GH_TOKEN" --channel win --outputDir releases || echo "No earlier Velopack release."
+          before=$(ls releases)
+          vpk pack --packId Sivryn.Desktop --packVersion "$version" --packTitle Sivryn \
+            --packAuthors RTBGG --packDir publish --mainExe sivryn-desktop.exe \
+            --icon apps/desktop/assets/icons/sivryn.ico --channel win --outputDir releases
+          # Sign the feed: the client ignores feeds without a valid signature.
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > signing-key.pem
+          openssl pkeyutl -sign -rawin -inkey signing-key.pem \
+            -in releases/releases.win.json -out releases/releases.win.json.sig
+          rm signing-key.pem
+          # Only what this version adds (earlier packages stay in their releases).
+          for f in releases/*; do
+            if ! grep -qxF "$(basename "$f")" <<< "$before" || [[ "$f" == *releases.win.json* ]]; then
+              cp "$f" dist/
+            fi
+          done
+          ls -l dist
+
       - name: Publish to GitHub release
         shell: bash
         env:

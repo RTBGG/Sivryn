@@ -2,3 +2,5 @@
 * text=auto eol=lf
 *.png binary
 *.ico binary
+# Signed test fixtures: their bytes must stay exactly as signed.
+apps/desktop/tests/fixtures/** binary
