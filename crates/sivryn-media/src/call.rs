@@ -29,9 +29,6 @@ pub enum CallEvent {
     VideoRemoved {
         track_sid: String,
     },
-    SpeakingChanged {
-        speakers: Vec<String>,
-    },
     /// A participant's microphone was muted or unmuted.
     MuteChanged {
         identity: String,
@@ -147,12 +144,12 @@ impl VoiceCall {
                     }
                     RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(audio), publication, participant } => {
                         let identity = participant.identity().to_string();
-                        let key = match publication.source() {
-                            TrackSource::ScreenshareAudio => screen_volume_key(&identity),
-                            _ => identity,
+                        let (key, speaker) = match publication.source() {
+                            TrackSource::ScreenshareAudio => (screen_volume_key(&identity), None),
+                            _ => (identity.clone(), Some(identity)),
                         };
                         let stream = NativeAudioStream::new(audio.rtc_track(), dsp::RATE as i32, 2);
-                        engine.add_remote(audio.sid().to_string(), key, stream);
+                        engine.add_remote(audio.sid().to_string(), key, speaker, stream);
                         continue;
                     }
                     RoomEvent::TrackUnsubscribed { track: RemoteTrack::Video(video), .. } => {
@@ -198,9 +195,6 @@ impl VoiceCall {
                             deafened: value == "1",
                         }
                     }
-                    RoomEvent::ActiveSpeakersChanged { speakers } => CallEvent::SpeakingChanged {
-                        speakers: speakers.iter().map(|p| p.identity().to_string()).collect(),
-                    },
                     RoomEvent::Disconnected { .. } => CallEvent::Disconnected,
                     _ => continue,
                 };

@@ -126,6 +126,13 @@ runs as the speech detector for automatic voice activity, whatever noise filter 
 Screen share audio (process loopback) is published separately as `ScreenshareAudio`: Opus
 stereo at 128 kbit/s without DTX, with its own volume per viewer.
 
+Each remote voice has a small jitter buffer in the mixer: it starts once 60 ms are buffered,
+drains gently above 120 ms (one sample pair per frame, following clock drift without audible
+cuts) and is cut back only after a stall (above 300 ms). The mixer also measures each voice it
+plays; that level, together with the local voice detection, drives the speaking indicators
+without the delay of LiveKit's server-side speaker report. Both audio threads run at raised
+priority, and voices that ran dry are logged every 30 s.
+
 ## Event flow
 
 REST writes go to PostgreSQL and then to `EventBus::publish`, addressed to a guild, a set of

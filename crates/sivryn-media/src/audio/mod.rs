@@ -33,14 +33,29 @@ pub use config::{AudioConfig, NoiseSuppression, VoiceMode};
 use dsp::{FRAME, RATE};
 pub use sounds::Sound;
 
-/// Remote audio is kept at most this far behind (samples, stereo).
 /// Volume keys of local streams (video players) start with this.
 pub const LOCAL_PREFIX: &str = "player:";
-const MAX_REMOTE_BUFFER: usize = (RATE as usize / 1000) * 150 * 2;
-/// …and trimmed back to this when it falls further behind.
-const TRIMMED_REMOTE_BUFFER: usize = (RATE as usize / 1000) * 40 * 2;
-/// A remote source starts (or restarts after running dry) once this much is buffered.
-const PRIME_REMOTE_BUFFER: usize = (RATE as usize / 1000) * 20 * 2;
+/// Samples (stereo) in `ms` milliseconds.
+const fn stereo_ms(ms: usize) -> usize {
+    (RATE as usize / 1000) * ms * 2
+}
+/// A remote voice starts (or restarts after running dry) once this much is
+/// buffered: enough to ride out network audio arriving unevenly. With 20 ms
+/// every small hiccup ran it dry and cut the voice into pieces.
+const PRIME_REMOTE_BUFFER: usize = stereo_ms(60);
+/// Above this the buffer is drained gently, one sample pair per 10 ms frame
+/// (0.2 %, inaudible), so a sender whose clock runs a little fast doesn't
+/// build up delay.
+const DRIFT_REMOTE_BUFFER: usize = stereo_ms(120);
+/// A backlog beyond this (after a stall) is cut back to the prime level.
+const MAX_REMOTE_BUFFER: usize = stereo_ms(300);
+/// Local streams (videos) start once this much is there.
+const PRIME_LOCAL_BUFFER: usize = stereo_ms(20);
+/// A remote voice louder than this (dBFS) counts as speaking. Senders only
+/// transmit while their voice detection is open, so this is just above silence.
+const SPEAKING_DB: f32 = -50.0;
+/// Speaking lasts this many 10 ms frames past the last loud one.
+const SPEAKING_HOLD_FRAMES: u32 = 25;
 /// How much mixed audio waits for the output device.
 const OUTPUT_TARGET: usize = (RATE as usize / 1000) * 30 * 2;
 /// Voice activity hold time (frames of 10 ms).
@@ -86,6 +101,30 @@ struct Remote {
     primed: bool,
     /// Feeds `buffer` from a LiveKit track; `None` for local streams.
     task: Option<tokio::task::JoinHandle<()>>,
+    /// The participant whose voice this is (microphone tracks only).
+    speaker: Option<String>,
+    /// Frames the speaking state still lasts.
+    speaking_hold: u32,
+    /// Times the buffer ran dry or was cut back, reported now and then.
+    underruns: u32,
+    cutbacks: u32,
+}
+
+impl Remote {
+    /// A stream produced locally (a video's sound).
+    fn local(key: &str, buffer: Arc<Mutex<VecDeque<f32>>>) -> Self {
+        Remote {
+            track_sid: key.to_owned(),
+            volume_key: key.to_owned(),
+            buffer,
+            primed: false,
+            task: None,
+            speaker: None,
+            speaking_hold: 0,
+            underruns: 0,
+            cutbacks: 0,
+        }
+    }
 }
 
 struct Inner {
@@ -99,6 +138,8 @@ struct Inner {
     /// Processed microphone level in dBFS (f32 bits), for meters.
     level: AtomicU32,
     transmitting: AtomicBool,
+    /// Participants whose voice is playing right now (from the mixer).
+    speaking: Mutex<Vec<String>>,
     mic: Mutex<Option<NativeAudioSource>>,
     remotes: Mutex<Vec<Remote>>,
     volumes: Mutex<HashMap<String, f32>>,
@@ -149,6 +190,7 @@ impl AudioEngine {
                 in_call: AtomicBool::new(false),
                 level: AtomicU32::new((-100.0f32).to_bits()),
                 transmitting: AtomicBool::new(false),
+                speaking: Mutex::new(Vec::new()),
                 mic: Mutex::new(None),
                 remotes: Mutex::new(Vec::new()),
                 volumes: Mutex::new(HashMap::new()),
@@ -207,6 +249,12 @@ impl AudioEngine {
         self.inner.transmitting.load(Ordering::Relaxed)
     }
 
+    /// Participants whose voice is playing right now. Taken from the audio
+    /// itself, so it follows speech without the server's delay.
+    pub fn speaking(&self) -> Vec<String> {
+        lock(&self.inner.speaking).clone()
+    }
+
     /// Mic test: runs the full chain and plays it back to the user.
     pub fn set_mic_test(&self, on: bool) {
         self.inner.mic_test.store(on, Ordering::Relaxed);
@@ -237,8 +285,15 @@ impl AudioEngine {
         self.ensure_threads();
     }
 
-    /// Starts playing a remote track. Must be called inside the Tokio runtime.
-    pub(crate) fn add_remote(&self, track_sid: String, volume_key: String, mut stream: NativeAudioStream) {
+    /// Starts playing a remote track; `speaker` is the participant for a
+    /// microphone track. Must be called inside the Tokio runtime.
+    pub(crate) fn add_remote(
+        &self,
+        track_sid: String,
+        volume_key: String,
+        speaker: Option<String>,
+        mut stream: NativeAudioStream,
+    ) {
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_REMOTE_BUFFER * 2)));
         let sink = buffer.clone();
         let sid = track_sid.clone();
@@ -264,7 +319,17 @@ impl AudioEngine {
             }
             keep
         });
-        remotes.push(Remote { track_sid, volume_key, buffer, primed: false, task: Some(task) });
+        remotes.push(Remote {
+            track_sid,
+            volume_key,
+            buffer,
+            primed: false,
+            task: Some(task),
+            speaker,
+            speaking_hold: 0,
+            underruns: 0,
+            cutbacks: 0,
+        });
         drop(remotes);
         self.ensure_threads();
     }
@@ -274,13 +339,7 @@ impl AudioEngine {
     /// [`AudioEngine::remove_local_stream`].
     pub fn add_local_stream(&self, key: &str) -> Arc<Mutex<VecDeque<f32>>> {
         let buffer = Arc::new(Mutex::new(VecDeque::new()));
-        lock(&self.inner.remotes).push(Remote {
-            track_sid: key.to_owned(),
-            volume_key: key.to_owned(),
-            buffer: buffer.clone(),
-            primed: false,
-            task: None,
-        });
+        lock(&self.inner.remotes).push(Remote::local(key, buffer.clone()));
         self.ensure_threads();
         buffer
     }
@@ -418,6 +477,7 @@ struct CaptureChain {
 }
 
 fn run_capture(inner: &Arc<Inner>) {
+    raise_thread_priority();
     let mut version = u64::MAX;
     let mut input: Option<InputStream> = None;
     let mut input_device: Option<Option<String>> = None;
@@ -599,6 +659,8 @@ fn run_playout(inner: &Arc<Inner>) {
     let mut retry_at = Instant::now();
     let mut idle_since: Option<Instant> = None;
     let mut mix = [0.0f32; FRAME * 2];
+    let mut reported = Instant::now();
+    raise_thread_priority();
 
     loop {
         // Stay open a while after the last sound: opening and closing the
@@ -648,7 +710,39 @@ fn run_playout(inner: &Arc<Inner>) {
             // Without a device, keep consuming so buffers don't pile up.
             None => mix_frame(inner, &config, &mut mix),
         }
+        if reported.elapsed() > Duration::from_secs(30) {
+            reported = Instant::now();
+            report_glitches(inner);
+        }
         std::thread::sleep(Duration::from_millis(3));
+    }
+}
+
+/// Logs remote voices that ran dry or had to be cut back lately (choppy
+/// audio comes from the network or the sender then, not from playback).
+fn report_glitches(inner: &Inner) {
+    for remote in lock(&inner.remotes).iter_mut().filter(|r| r.underruns + r.cutbacks > 0) {
+        tracing::info!(
+            track = %remote.track_sid,
+            underruns = remote.underruns,
+            cutbacks = remote.cutbacks,
+            "remote audio glitches in the last 30 s"
+        );
+        remote.underruns = 0;
+        remote.cutbacks = 0;
+    }
+}
+
+/// Audio threads must run on time even while the UI or a video keeps the
+/// CPU busy; late ones are heard as crackles and gaps.
+fn raise_thread_priority() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        // SAFETY: changes only the calling thread's priority.
+        if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
+            tracing::debug!(error = %e, "could not raise audio thread priority");
+        }
     }
 }
 
@@ -656,33 +750,66 @@ fn mix_frame(inner: &Inner, config: &AudioConfig, mix: &mut [f32; FRAME * 2]) {
     mix.fill(0.0);
     let master = config.output_volume;
 
-    if !inner.deafened.load(Ordering::Relaxed) {
-        let volumes = lock(&inner.volumes).clone();
-        for remote in lock(&inner.remotes).iter_mut() {
-            let mut buf = lock(&remote.buffer);
-            if !remote.primed {
-                if buf.len() < PRIME_REMOTE_BUFFER {
-                    continue;
-                }
-                remote.primed = true;
-            }
-            // Live audio drops a backlog to keep latency low. Local streams
-            // (videos) are paced by their player and arrive in big blocks,
-            // which this would cut to pieces.
-            if remote.task.is_some() && buf.len() > MAX_REMOTE_BUFFER {
-                let excess = (buf.len() - TRIMMED_REMOTE_BUFFER) & !1;
+    // Remote audio keeps flowing while deafened (only not heard), so the
+    // speaking indicators still work and no backlog builds up.
+    let deafened = inner.deafened.load(Ordering::Relaxed);
+    let volumes = lock(&inner.volumes).clone();
+    let mut speaking = Vec::new();
+    for remote in lock(&inner.remotes).iter_mut() {
+        let live = remote.task.is_some();
+        let mut buf = lock(&remote.buffer);
+        let mut energy = 0.0f32;
+        let mut played = 0usize;
+        let prime = if live { PRIME_REMOTE_BUFFER } else { PRIME_LOCAL_BUFFER };
+        if remote.primed || buf.len() >= prime {
+            remote.primed = true;
+            // Live audio keeps its delay in check. Local streams (videos) are
+            // paced by their player and arrive in big blocks, which this
+            // would cut to pieces.
+            if live && buf.len() > MAX_REMOTE_BUFFER {
+                let excess = (buf.len() - PRIME_REMOTE_BUFFER) & !1;
                 buf.drain(..excess);
+                remote.cutbacks += 1;
+            } else if live && buf.len() > DRIFT_REMOTE_BUFFER {
+                buf.drain(..2);
             }
             let volume = master * volumes.get(&remote.volume_key).copied().unwrap_or(1.0);
             for out in mix.iter_mut() {
                 match buf.pop_front() {
-                    Some(s) => *out += s * volume,
+                    Some(s) => {
+                        energy += s * s;
+                        played += 1;
+                        if !deafened {
+                            *out += s * volume;
+                        }
+                    }
                     None => {
                         remote.primed = false;
+                        if live {
+                            remote.underruns += 1;
+                        }
                         break;
                     }
                 }
             }
+        }
+        drop(buf);
+        if let Some(speaker) = &remote.speaker {
+            let level = if played == 0 { -100.0 } else { 10.0 * (energy / played as f32).max(1e-10).log10() };
+            if level > SPEAKING_DB {
+                remote.speaking_hold = SPEAKING_HOLD_FRAMES;
+            } else {
+                remote.speaking_hold = remote.speaking_hold.saturating_sub(1);
+            }
+            if remote.speaking_hold > 0 && !speaking.contains(speaker) {
+                speaking.push(speaker.clone());
+            }
+        }
+    }
+    {
+        let mut current = lock(&inner.speaking);
+        if *current != speaking {
+            *current = speaking;
         }
     }
 
@@ -730,13 +857,7 @@ mod tests {
     fn local_streams_are_mixed() {
         let engine = AudioEngine::new(AudioConfig::default());
         let buffer = Arc::new(Mutex::new(VecDeque::new()));
-        lock(&engine.inner.remotes).push(Remote {
-            track_sid: "player:test".into(),
-            volume_key: "player:test".into(),
-            buffer: buffer.clone(),
-            primed: false,
-            task: None,
-        });
+        lock(&engine.inner.remotes).push(Remote::local("player:test", buffer.clone()));
         // Far more than the live backlog limit: local streams keep it all.
         lock(&buffer).extend(std::iter::repeat_n(0.25f32, MAX_REMOTE_BUFFER * 3));
         let config = AudioConfig::default();
@@ -745,5 +866,71 @@ mod tests {
         let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.1, "peak {peak}");
         assert_eq!(lock(&buffer).len(), MAX_REMOTE_BUFFER * 3 - FRAME * 2);
+    }
+
+    /// A remote voice as if fed by a LiveKit track.
+    fn live_remote(rt: &tokio::runtime::Runtime, speaker: &str) -> (Remote, Arc<Mutex<VecDeque<f32>>>) {
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let mut remote = Remote::local(speaker, buffer.clone());
+        remote.task = Some(rt.spawn(std::future::pending::<()>()));
+        remote.speaker = Some(speaker.to_owned());
+        (remote, buffer)
+    }
+
+    #[test]
+    fn voices_wait_for_a_cushion_and_follow_drift() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let engine = AudioEngine::new(AudioConfig::default());
+        let (remote, buffer) = live_remote(&rt, "ann");
+        lock(&engine.inner.remotes).push(remote);
+        let config = AudioConfig::default();
+        let mut mix = [0.0f32; FRAME * 2];
+        let loud = |ms: usize| std::iter::repeat_n(0.3f32, stereo_ms(ms));
+
+        // 50 ms isn't enough to start: nothing plays yet.
+        lock(&buffer).extend(loud(50));
+        mix_frame(&engine.inner, &config, &mut mix);
+        assert!(mix.iter().all(|s| *s == 0.0));
+        assert_eq!(lock(&buffer).len(), stereo_ms(50));
+
+        // At 60 ms it plays, and Ann shows as speaking right away.
+        lock(&buffer).extend(loud(20));
+        mix_frame(&engine.inner, &config, &mut mix);
+        assert!(mix[0] > 0.1);
+        assert_eq!(lock(&buffer).len(), stereo_ms(60));
+        assert_eq!(engine.speaking(), ["ann"]);
+
+        // A buffer that grew past 120 ms is drained a little faster.
+        lock(&buffer).extend(loud(140));
+        mix_frame(&engine.inner, &config, &mut mix);
+        assert_eq!(lock(&buffer).len(), stereo_ms(200) - FRAME * 2 - 2);
+
+        // A big backlog (after a stall) is cut back.
+        lock(&buffer).extend(loud(300));
+        mix_frame(&engine.inner, &config, &mut mix);
+        assert_eq!(lock(&buffer).len(), PRIME_REMOTE_BUFFER - FRAME * 2);
+
+        // Silence: speaking ends after the hold time.
+        lock(&buffer).clear();
+        lock(&buffer).extend(std::iter::repeat_n(0.0f32, stereo_ms(400)));
+        for _ in 0..SPEAKING_HOLD_FRAMES {
+            mix_frame(&engine.inner, &config, &mut mix);
+        }
+        assert!(engine.speaking().is_empty());
+    }
+
+    #[test]
+    fn deafened_voices_still_show_as_speaking() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let engine = AudioEngine::new(AudioConfig::default());
+        let (remote, buffer) = live_remote(&rt, "bob");
+        lock(&engine.inner.remotes).push(remote);
+        engine.inner.deafened.store(true, Ordering::Relaxed);
+        lock(&buffer).extend(std::iter::repeat_n(0.3f32, stereo_ms(80)));
+        let mut mix = [0.0f32; FRAME * 2];
+        mix_frame(&engine.inner, &AudioConfig::default(), &mut mix);
+        assert!(mix.iter().all(|s| *s == 0.0), "deafened: nothing heard");
+        assert_eq!(engine.speaking(), ["bob"]);
+        assert_eq!(lock(&buffer).len(), stereo_ms(70), "and no backlog builds up");
     }
 }

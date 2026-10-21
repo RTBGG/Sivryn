@@ -192,6 +192,7 @@ async fn connect_inner(
     } else {
         None
     };
+    let voices = engine.clone();
     let (mut call, mut events) = VoiceCall::join(&join, media_key, engine).await.map_err(|e| e.to_string())?;
     if let Err(e) = call.enable_microphone().await {
         state.report(Err(format!("{}: {e}", t("call.mic_unavailable"))));
@@ -230,6 +231,27 @@ async fn connect_inner(
     }));
     spawn_forever(state.refresh_voice());
 
+    // Who is speaking, from the audio itself: your own voice detection and
+    // the voices being played. The server's report lags by half a second.
+    let me = state.call.peek().as_ref().map(|c| c.identity.clone()).unwrap_or_default();
+    spawn_forever(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let mut now = voices.speaking();
+            if voices.transmitting() {
+                now.push(me.clone());
+            }
+            now.sort();
+            let changed = match state.call.peek().as_ref() {
+                Some(c) if c.channel == channel => c.speakers != now,
+                _ => break,
+            };
+            if changed && let Some(c) = state.call.write().as_mut() {
+                c.speakers = now;
+            }
+        }
+    });
+
     spawn_forever(async move {
         while let Some(event) = events.recv().await {
             // Look up names before taking the write lock on the call.
@@ -249,7 +271,6 @@ async fn connect_inner(
                         c.focus = None;
                     }
                 }
-                CallEvent::SpeakingChanged { speakers } => c.speakers = speakers,
                 CallEvent::ParticipantJoined { identity, .. } => {
                     if !c.participants.iter().any(|p| p.identity == identity) {
                         let name = joined_name.unwrap_or_default();
