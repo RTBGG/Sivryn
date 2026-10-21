@@ -62,7 +62,7 @@ pub mod caret;
 // Sivryn patch: static text selection and bottom-pinned scrolling.
 mod stick_bottom;
 pub mod scrollbar;
-mod zoom_anchor;
+pub mod zoom_anchor;
 pub mod text_selection;
 pub mod net;
 pub mod util;

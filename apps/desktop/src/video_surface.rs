@@ -332,6 +332,11 @@ impl CustomPaintSource for VideoSurface {
             return None;
         }
         let gpu = self.gpu.as_mut()?;
+        // Larger than the GPU allows: draw nothing rather than fail (and crash).
+        let max = gpu.device.limits().max_texture_dimension_2d;
+        if width > max || height > max {
+            return None;
+        }
 
         // A still image only has the channel's initial value, which
         // `has_changed` never reports; take it when nothing is shown yet.

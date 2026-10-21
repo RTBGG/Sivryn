@@ -402,6 +402,8 @@ impl<Rend: WindowRenderer> View<Rend> {
             WindowEvent::CursorMoved { position, .. } => {
                 let winit::dpi::LogicalPosition::<f32> { x, y } = position.to_logical(self.window.scale_factor());
                 self.mouse_pos = (x, y);
+                // Sivryn patch: zooming keeps the content under the mouse in place.
+                blitz_dom::zoom_anchor::set_pointer(x as f64, y as f64);
                 // Sivryn patch: scroll bars (blitz-dom's scrollbar.rs).
                 let (consumed, repaint) = self.doc.scrollbar_move(x, y);
                 if repaint {

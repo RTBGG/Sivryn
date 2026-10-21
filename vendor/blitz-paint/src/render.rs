@@ -710,17 +710,26 @@ impl ElementCx<'_> {
 
             let transform = self.transform.then_translate(Vec2 { x, y });
 
+            // Sivryn patch: a canvas larger than GPUs allow for a texture (e.g. a
+            // zoomed image) gets a smaller texture, stretched to the canvas.
+            // Creating the full-size texture failed and crashed the app.
+            const MAX_TEXTURE: u32 = 8192;
+            let shrink = (MAX_TEXTURE as f64 / width.max(height).max(1) as f64).min(1.0);
+            let (texture_width, texture_height) =
+                ((width as f64 * shrink) as u32, (height as f64 * shrink) as u32);
+            let brush_transform = (shrink < 1.0).then(|| Affine::scale(1.0 / shrink));
+
             scene.fill(
                 Fill::NonZero,
                 transform,
                 // TODO: replace `Arc<dyn Any>` with `CustomPaint` in API?
                 Paint::Custom(&CustomPaint {
                     source_id: custom_paint_source.custom_paint_source_id,
-                    width,
-                    height,
-                    scale: self.scale,
+                    width: texture_width,
+                    height: texture_height,
+                    scale: self.scale * shrink,
                 } as &(dyn Any + Send + Sync)),
-                None,
+                brush_transform,
                 &Rect::from_origin_size((0.0, 0.0), (width as f64, height as f64)),
             );
         }

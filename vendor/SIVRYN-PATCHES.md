@@ -7,6 +7,9 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 
 ## blitz-paint 0.2.1
 
+- `src/render.rs` (`draw_canvas`): canvases larger than 8192 px (the usual GPU texture limit,
+  e.g. a zoomed image) render into a smaller texture that is stretched to the canvas; the
+  full-size texture failed validation and crashed the app.
 - `src/render.rs` (`render_element`): draws the scroll bar thumb of scroll containers (see
   `scrollbar.rs` in blitz-dom).
 - `src/render.rs`: the text input caret uses the element's text colour instead of
@@ -57,8 +60,9 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
   any canvas existed; with Vello that cost 10–20 % of a fast GPU for one small (even still)
   image. Canvas sources request repaints themselves (see `canvas_frames.rs` in blitz-shell).
 - `src/zoom_anchor.rs` (+ `document.rs`, `lib.rs`): a scroll container with a `data-zoom`
-  attribute (the current scale) keeps the point in its middle in place when the scale changes,
-  instead of zoomed content growing from the top left corner (image viewer).
+  attribute (the current scale) keeps the point of its content under the mouse in place when the
+  scale changes (the middle when the mouse is elsewhere), instead of zoomed content growing from
+  the top left corner (image viewer). blitz-shell reports the mouse position.
 
 ## blitz-shell 0.2.3
 

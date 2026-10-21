@@ -226,7 +226,7 @@ pub fn ImageViewer() -> Element {
                     state.viewer.set(None);
                 }
             },
-            // `data-zoom`: zooming keeps the middle of the view in place.
+            // `data-zoom`: zooming keeps the spot under the mouse in place.
             div { class: if zoomed { "viewer-stage zoomed" } else { "viewer-stage" }, "data-zoom": "{scale}",
                 div {
                     class: if zoomed { "viewer-image zoom-out" } else { "viewer-image zoom-in" },
