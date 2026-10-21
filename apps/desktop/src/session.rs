@@ -36,6 +36,7 @@ impl PartialEq for Session {
 
 impl Session {
     /// Logs in (or registers) with a password.
+    /// Signs in, or registers a new account.
     pub async fn login(
         instance: &str,
         username: &str,
@@ -54,7 +55,7 @@ impl Session {
         } else {
             api.login(username, password).await
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(sign_in_error)?;
 
         let account = AccountId { instance: api.base_url().to_owned(), user_id: user.id };
         let store = Store::open(&account, api.token()).map_err(|e| e.to_string())?;
@@ -164,4 +165,22 @@ impl Session {
 
 fn device_name() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Desktop".into())
+}
+
+/// What went wrong signing in or registering, in words people understand.
+fn sign_in_error(e: sivryn_client_core::ClientError) -> String {
+    use sivryn_client_core::ClientError;
+    let key = match &e {
+        ClientError::Api { code, .. } => match code.as_str() {
+            "invite_required" => "login.error.invite_required",
+            "invalid_invite" => "login.error.invalid_invite",
+            "registration_closed" => "login.error.registration_closed",
+            "unauthorized" => "login.error.wrong_password",
+            "conflict" => "login.error.username_taken",
+            _ => return e.to_string(),
+        },
+        ClientError::Network(_) => "login.error.unreachable",
+        _ => return e.to_string(),
+    };
+    crate::i18n::t(key).to_owned()
 }

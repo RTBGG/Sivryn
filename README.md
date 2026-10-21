@@ -49,8 +49,9 @@ docker compose up -d
 ```
 
 Open the desktop app, enter `https://your.domain` and register. The first account becomes the
-instance admin. Registration defaults to invite-only. Change `SIVRYN_REGISTRATION` in
-`deploy/.env` to `open` or `closed` as you like.
+instance admin. Registration defaults to invite-only: new people register with a server invite
+(from "Invite friends", they join that server right away) or an instance invite. Change
+`SIVRYN_REGISTRATION` in `deploy/.env` to `open` or `closed` as you like.
 
 Files sent in chats are stored encrypted on the `files` volume (only ciphertext; the keys
 travel inside the encrypted messages). `SIVRYN_MAX_UPLOAD_MB` limits the size per file

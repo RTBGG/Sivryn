@@ -475,8 +475,19 @@ fn InviteDialog() -> Element {
                 }
                 p { class: "muted", {t("invite.hint")} }
                 div { class: "invite-code",
-                    match invite.read().as_ref() {
-                        Some(code) => rsx! { span { class: "code", "{code}" } },
+                    match invite.read().clone() {
+                        Some(code) => rsx! {
+                            span { class: "code", "{code}" }
+                            button {
+                                class: "button",
+                                onclick: move |_| {
+                                    super::menu::copy_to_clipboard(&code);
+                                    state.toast(t("toast.copied"), false);
+                                },
+                                Svg { icon: Icon::Copy, size: 16 }
+                                {t("invite.copy")}
+                            }
+                        },
                         None => rsx! { span { class: "muted", {t("common.wait")} } },
                     }
                 }

@@ -75,6 +75,20 @@ async fn first_user_is_admin_and_registration_is_invite_only() {
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["user"]["id"], bob.id.to_string());
 
+    // Clear reasons: no code at all versus a wrong one.
+    assert_eq!(app.try_register("dave", None).await.1["error"], "invite_required");
+    assert_eq!(app.try_register("dave", Some("nope")).await.1["error"], "invalid_invite");
+
+    // A server invite lets someone register too, and they join that server.
+    let guild = create_guild(&app, &admin, "Lobby").await;
+    let invite: Value = app.post_ok(&format!("/guilds/{}/invites", guild.guild.id), &admin.token, json!(null)).await;
+    let guild_code = invite["code"].as_str().unwrap().to_owned();
+    let (status, json) = app.try_register("erin", Some(&format!(" {guild_code} "))).await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    let erin: User = serde_json::from_value(json["user"].clone()).unwrap();
+    let members: Vec<GuildMember> = app.get_ok(&format!("/guilds/{}/members", guild.guild.id), &admin.token).await;
+    assert!(members.iter().any(|m| m.user.id == erin.id), "erin joined the server");
+
     app.cleanup().await;
 }
 

@@ -13,6 +13,14 @@ pub enum ApiError {
     Unauthorized,
     #[error("missing permission")]
     Forbidden,
+    /// Registration on an invite-only instance without a code.
+    #[error("an invite code is needed to register")]
+    InviteRequired,
+    /// An invite code that doesn't exist, expired or is used up.
+    #[error("the invite code is invalid, expired or used up")]
+    InvalidInvite,
+    #[error("registration is closed on this instance")]
+    RegistrationClosed,
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -31,6 +39,9 @@ impl ApiError {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::InviteRequired => (StatusCode::FORBIDDEN, "invite_required"),
+            Self::InvalidInvite => (StatusCode::FORBIDDEN, "invalid_invite"),
+            Self::RegistrationClosed => (StatusCode::FORBIDDEN, "registration_closed"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Self::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),

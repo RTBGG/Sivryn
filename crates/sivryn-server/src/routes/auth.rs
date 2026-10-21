@@ -1,9 +1,10 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use sivryn_protocol::UserId;
 use sivryn_protocol::api::{LoginRequest, RegisterRequest, RegistrationMode, SessionResponse};
+use sivryn_protocol::gateway::{Audience, Event};
 use sivryn_protocol::model::User;
+use sivryn_protocol::{GuildId, UserId};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -39,13 +40,17 @@ pub async fn register(
     // regardless of the registration mode.
     let is_first = user_count == 0;
 
+    // An instance invite or a server invite: either lets someone register on
+    // an invite-only instance; a server invite also makes them a member.
+    let code = req.invite_code.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    let mut join_guild = None;
     if !is_first {
-        match state.config.registration {
-            RegistrationMode::Open => {}
-            RegistrationMode::Closed => return Err(ApiError::Forbidden),
-            RegistrationMode::InviteOnly => {
-                let code = req.invite_code.as_deref().ok_or(ApiError::Forbidden)?;
-                let used = sqlx::query(
+        match (state.config.registration, code) {
+            (RegistrationMode::Closed, _) => return Err(ApiError::RegistrationClosed),
+            (RegistrationMode::InviteOnly, None) => return Err(ApiError::InviteRequired),
+            (_, None) => {}
+            (_, Some(code)) => {
+                let instance = sqlx::query(
                     "UPDATE invites SET uses = uses + 1
                      WHERE code = $1 AND guild_id IS NULL
                        AND (max_uses IS NULL OR uses < max_uses)
@@ -54,8 +59,18 @@ pub async fn register(
                 .bind(code)
                 .execute(&mut *tx)
                 .await?;
-                if used.rows_affected() == 0 {
-                    return Err(ApiError::Forbidden);
+                if instance.rows_affected() == 0 {
+                    let guild: Option<(Uuid,)> = sqlx::query_as(
+                        "UPDATE invites SET uses = uses + 1
+                         WHERE code = $1 AND guild_id IS NOT NULL
+                           AND (max_uses IS NULL OR uses < max_uses)
+                           AND (expires_at IS NULL OR expires_at > now())
+                         RETURNING guild_id",
+                    )
+                    .bind(code)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    join_guild = Some(GuildId(guild.ok_or(ApiError::InvalidInvite)?.0));
                 }
             }
         }
@@ -76,10 +91,22 @@ pub async fn register(
                 }
                 _ => e.into(),
             })?;
+    if let Some(guild_id) = join_guild {
+        sqlx::query("INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2)")
+            .bind(guild_id.0)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
+    let id = UserId(user.id);
+    let user: User = user.into();
+    if let Some(guild_id) = join_guild {
+        state.events.publish(Audience::Guild(guild_id), Event::MemberJoin { guild_id, user: user.clone() });
+    }
 
-    let token = auth::create_session(&state.db, UserId(user.id), state.config.session_ttl_days).await?;
-    Ok((StatusCode::CREATED, Json(SessionResponse { token, user: user.into() })))
+    let token = auth::create_session(&state.db, id, state.config.session_ttl_days).await?;
+    Ok((StatusCode::CREATED, Json(SessionResponse { token, user })))
 }
 
 pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> ApiResult<Json<SessionResponse>> {

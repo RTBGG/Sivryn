@@ -96,8 +96,30 @@ const TEXTS: &[(&str, &str, &str)] = &[
     ("login.invite", "Einladungscode", "Invite code"),
     (
         "login.invite_hint",
-        "Nur nötig, wenn die Instanz nur mit Einladung offen ist",
-        "Only needed if the instance is invite-only",
+        "Code einer Server-Einladung oder der Instanz (nicht immer nötig)",
+        "A server or instance invite code (not always needed)",
+    ),
+    (
+        "login.error.invite_required",
+        "Diese Instanz braucht einen Einladungscode. Frag jemanden auf dem Server nach einer Einladung.",
+        "This instance needs an invite code. Ask someone on the server for an invite.",
+    ),
+    (
+        "login.error.invalid_invite",
+        "Der Einladungscode ist ungültig, abgelaufen oder schon verbraucht.",
+        "The invite code is invalid, expired or used up.",
+    ),
+    (
+        "login.error.registration_closed",
+        "Auf dieser Instanz kann man sich gerade nicht registrieren.",
+        "Registration is closed on this instance.",
+    ),
+    ("login.error.wrong_password", "Benutzername oder Passwort ist falsch.", "Wrong username or password."),
+    ("login.error.username_taken", "Dieser Benutzername ist schon vergeben.", "That username is already taken."),
+    (
+        "login.error.unreachable",
+        "Die Instanz ist nicht erreichbar. Stimmt die Adresse?",
+        "Can't reach the instance. Is the address right?",
     ),
     ("login.show_password", "Passwort anzeigen", "Show password"),
     ("login.hide_password", "Passwort verbergen", "Hide password"),
@@ -156,9 +178,10 @@ const TEXTS: &[(&str, &str, &str)] = &[
     ("invite.title", "Freunde einladen", "Invite friends"),
     (
         "invite.hint",
-        "Schicke diesen Code an die Person, die du einladen möchtest.",
-        "Send this code to the person you want to invite.",
+        "Schicke diesen Code an die Person, die du einladen möchtest. Wer noch kein Konto hat, kann sich damit auch registrieren.",
+        "Send this code to the person you want to invite. Someone without an account can register with it too.",
     ),
+    ("invite.copy", "Kopieren", "Copy"),
     // Chat
     ("chat.message_to", "Nachricht an", "Message"),
     ("chat.e2ee", "E2EE", "E2EE"),
