@@ -418,7 +418,7 @@ fn ConfirmModeration(guild: GuildId, user: UserId, ban: bool) -> Element {
             } else {
                 s.api.remove_member(guild, user).await
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(()) => state.modal.set(None),
                 Err(e) => state.report(Err(e.to_string())),
@@ -455,14 +455,14 @@ fn ConfirmModeration(guild: GuildId, user: UserId, ban: bool) -> Element {
 fn InviteDialog() -> Element {
     let mut state = use_context::<AppState>();
     let mut invite = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     // Create the invite as soon as the dialog opens.
     use_hook(move || {
         let (Some(s), Some(guild)) = (state.session.cloned(), *state.guild.peek()) else { return };
         spawn(async move {
             match s.api.create_invite(guild).await {
                 Ok(code) => invite.set(Some(code)),
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
     });
@@ -520,7 +520,7 @@ fn GuildDialog(modal: Modal) -> Element {
                 }
                 _ => s.api.accept_invite(&value).await,
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(g) => {
                     let id = g.guild.id;
@@ -532,7 +532,7 @@ fn GuildDialog(modal: Modal) -> Element {
                     // Keep refreshing even though this dialog is gone now.
                     spawn_forever(async move { state.report(state.refresh().await) });
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
     };

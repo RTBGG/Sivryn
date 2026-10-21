@@ -26,6 +26,16 @@ thread_local! {
 }
 const HOVER_GRACE: std::time::Duration = std::time::Duration::from_millis(40);
 
+/// Sets a component's signal from a task that outlives it (`spawn_forever`
+/// for a server request): when the component is gone by then, e.g. rebuilt
+/// by the server's change event, there is nothing to update. `set` would
+/// panic on the dropped signal.
+pub fn set_if_alive<T: 'static>(mut signal: Signal<T>, value: T) {
+    if let Ok(mut current) = signal.try_write() {
+        *current = value;
+    }
+}
+
 /// Whether the element is hovered, and the handler to put on its `onmousemove`.
 pub fn use_hover() -> (bool, impl FnMut(MouseEvent) + Clone + 'static) {
     let flag = use_signal(|| false);

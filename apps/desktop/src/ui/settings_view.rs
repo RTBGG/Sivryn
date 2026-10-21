@@ -170,7 +170,7 @@ fn AccountPage() -> Element {
         let Some(s) = state.session.cloned() else { return };
         spawn_forever(async move {
             match s.api.remove_profile_image(is_banner).await {
-                Ok(()) if is_banner => banner.set(None),
+                Ok(()) if is_banner => super::widgets::set_if_alive(banner, None),
                 Ok(()) => {}
                 Err(e) => state.report(Err(e.to_string())),
             }

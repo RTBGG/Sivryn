@@ -11,7 +11,7 @@ use sivryn_client_core::protocol::{GuildId, RoleId, UserId};
 
 use super::AppState;
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, Segmented, Select, Toggle, opt};
+use super::widgets::{Avatar, Segmented, Select, Toggle, opt, set_if_alive};
 use crate::i18n::t;
 
 /// Guild permissions by section, as the role editor lists them.
@@ -306,11 +306,11 @@ pub fn RolesPage(guild: GuildId) -> Element {
             match s.api.create_role(guild, &req).await {
                 Ok(role) => {
                     state.report(state.refresh().await);
-                    selected.set(Some(role.id));
+                    set_if_alive(selected, Some(role.id));
                 }
                 Err(e) => state.report(Err(e.to_string())),
             }
-            busy.set(false);
+            set_if_alive(busy, false);
         });
     };
     let order_now = std::rc::Rc::new(movable.clone());
@@ -402,7 +402,7 @@ pub fn RolesPage(guild: GuildId) -> Element {
                     Some(role) => rsx! {
                         // Keyed by role: a new selection starts a fresh draft.
                         for role in [role] {
-                            RoleEditor { key: "{role.id}", guild, role, on_deleted: move |_| selected.set(None) }
+                            RoleEditor { key: "{role.id}", guild, role }
                         }
                     },
                     None => rsx! { div { class: "muted role-empty", {t("roles.pick")} } },
@@ -413,7 +413,7 @@ pub fn RolesPage(guild: GuildId) -> Element {
 }
 
 #[component]
-fn RoleEditor(guild: GuildId, role: Role, on_deleted: EventHandler<()>) -> Element {
+fn RoleEditor(guild: GuildId, role: Role) -> Element {
     let state = use_context::<AppState>();
     let original = Draft::of(&role);
     let mut draft = use_signal({
@@ -444,7 +444,7 @@ fn RoleEditor(guild: GuildId, role: Role, on_deleted: EventHandler<()>) -> Eleme
                 }
             };
             let result = s.api.update_role(id, &req).await.map(|_| ()).map_err(|e| e.to_string());
-            busy.set(false);
+            set_if_alive(busy, false);
             state.report(result);
             state.report(state.refresh().await);
         });
@@ -460,9 +460,9 @@ fn RoleEditor(guild: GuildId, role: Role, on_deleted: EventHandler<()>) -> Eleme
             return;
         }
         spawn_forever(async move {
+            // Afterwards the role is gone from the list and the editor with it.
             state.report(s.api.delete_role(id).await.map_err(|e| e.to_string()));
             state.report(state.refresh().await);
-            on_deleted.call(());
         });
     };
 

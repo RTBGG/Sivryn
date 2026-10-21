@@ -153,7 +153,7 @@ fn CropEditor(request: CropRequest, on_close: EventHandler<()>) -> Element {
                 .map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(()) => {
                     state.crop.set(None);

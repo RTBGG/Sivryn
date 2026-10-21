@@ -306,7 +306,7 @@ fn AddFriend() -> Element {
         busy.set(true);
         spawn(async move {
             let r = s.api.send_friend_request(&value).await;
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match r {
                 Ok(()) => {
                     result.set(Some((true, format!("{} @{value}", t("friends.request_sent_to")))));
@@ -397,7 +397,7 @@ pub fn PickPeople(channel: Option<ChannelId>) -> Element {
                 }
                 None => s.api.open_dm(users).await,
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(dm) => {
                     let id = dm.channel.id;

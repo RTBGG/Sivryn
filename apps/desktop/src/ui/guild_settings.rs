@@ -113,7 +113,7 @@ fn Overview(guild: GuildId) -> Element {
         saving.set(true);
         spawn_forever(async move {
             let r = s.api.update_guild(guild, &req).await.map(|_| ()).map_err(|e| e.to_string());
-            saving.set(false);
+            super::widgets::set_if_alive(saving, false);
             state.report(r);
             state.report(state.refresh().await);
         });
@@ -220,7 +220,7 @@ fn DeleteGuild(guild: GuildId, name: String) -> Element {
                     state.report(state.refresh().await);
                 }
                 Err(e) => {
-                    busy.set(false);
+                    super::widgets::set_if_alive(busy, false);
                     state.report(Err(e.to_string()));
                 }
             }

@@ -158,7 +158,7 @@ fn Overview(place: Place) -> Element {
                     .map(|_| ()),
                 Place::Category(c) => s.api.rename_category(c, &value).await,
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             state.report(result.map_err(|e| e.to_string()));
             state.report(state.refresh().await);
         });

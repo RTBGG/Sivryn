@@ -479,7 +479,7 @@ pub fn CreateChannelDialog(guild: GuildId, category: Option<CategoryId>, kind: C
     let mut name = use_signal(String::new);
     let mut kind = use_signal(move || kind);
     let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     let category_name = category.and_then(|c| {
         state.guilds.read().iter().flat_map(|g| &g.categories).find(|x| x.id == c).map(|x| x.name.clone())
     });
@@ -498,7 +498,7 @@ pub fn CreateChannelDialog(guild: GuildId, category: Option<CategoryId>, kind: C
         };
         spawn(async move {
             let result = s.api.create_channel(guild, &req).await;
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(channel) => {
                     state.modal.set(None);
@@ -507,7 +507,7 @@ pub fn CreateChannelDialog(guild: GuildId, category: Option<CategoryId>, kind: C
                         state.channel.set(Some(channel.id));
                     });
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
     };
@@ -583,7 +583,7 @@ pub fn CategoryDialog(guild: GuildId, existing: Option<CategoryId>) -> Element {
     let mut name = use_signal(move || current_name);
     let mut busy = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     let mut save = move || {
         let Some(s) = state.session.cloned() else { return };
         let value = name.read().trim().to_owned();
@@ -596,13 +596,13 @@ pub fn CategoryDialog(guild: GuildId, existing: Option<CategoryId>) -> Element {
                 Some(c) => s.api.rename_category(c, &value).await,
                 None => s.api.create_category(guild, &value).await.map(|_| ()),
             };
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(()) => {
                     state.modal.set(None);
                     spawn_forever(async move { state.report(state.refresh().await) });
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
     };
@@ -671,7 +671,7 @@ pub fn ChannelSettingsDialog(channel: ChannelId) -> Element {
     let mut name = use_signal(move || info.as_ref().map(|c| c.name.clone()).unwrap_or_default());
     let mut busy = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     let mut save = move || {
         let Some(s) = state.session.cloned() else { return };
         let value = name.read().trim().to_owned();
@@ -682,13 +682,13 @@ pub fn ChannelSettingsDialog(channel: ChannelId) -> Element {
         spawn(async move {
             let req = UpdateChannelRequest { name: Some(value), ..Default::default() };
             let result = s.api.update_channel(channel, &req).await;
-            busy.set(false);
+            super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(_) => {
                     state.modal.set(None);
                     spawn_forever(async move { state.report(state.refresh().await) });
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
     };
