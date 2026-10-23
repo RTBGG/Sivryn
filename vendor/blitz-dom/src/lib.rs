@@ -64,6 +64,7 @@ mod stick_bottom;
 pub mod scrollbar;
 pub mod zoom_anchor;
 pub mod text_selection;
+pub mod input_editing;
 pub mod net;
 pub mod util;
 

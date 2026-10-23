@@ -41,7 +41,11 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
             {
                 doc.shell_provider.request_redraw();
             }
-            handle_mousedown(doc, target_node_id, event.x, event.y);
+            // Sivryn patch: only the main button moves the caret, so a right
+            // click keeps the selection for the context menu.
+            if event.button == blitz_traits::events::MouseEventButton::Main {
+                handle_mousedown(doc, target_node_id, event.x, event.y);
+            }
         }
         DomEventData::MouseUp(event) => {
             crate::text_selection::mouse_up();

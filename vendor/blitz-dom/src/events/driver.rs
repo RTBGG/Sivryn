@@ -67,6 +67,10 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 let dom_y = event.y + viewport_scroll.y as f32 / zoom;
                 self.doc_mut().set_hover_to(dom_x, dom_y);
                 hover_node_id = self.doc().hover_node_id;
+                // Sivryn patch: what a context menu on a text input needs to know.
+                if event.button == blitz_traits::events::MouseEventButton::Secondary {
+                    crate::input_editing::note_context(self.doc(), hover_node_id);
+                }
                 self.doc_mut().active_node();
                 self.doc_mut().set_mousedown_node_id(hover_node_id);
             }

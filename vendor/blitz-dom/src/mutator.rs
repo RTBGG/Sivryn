@@ -394,7 +394,14 @@ impl DocumentMutator<'_> {
     // Tree mutation methods
     pub fn remove_node_if_unparented(&mut self, node_id: usize) {
         if let Some(node) = self.doc.get_node(node_id) {
-            if node.parent.is_none() {
+            // Sivryn patch: only nodes that left the document. dioxus-native-dom
+            // calls this with the node an element id was mapped to before; that
+            // mapping goes stale when the node is dropped, and once the slab
+            // reuses the key for a cached template node (which has no parent
+            // either), the template was dropped and the next use of it crashed
+            // ("invalid key" in deep_clone_node, a missing child in
+            // node_at_path).
+            if node.parent.is_none() && node.flags.contains(NodeFlags::WAS_IN_DOCUMENT) {
                 self.remove_and_drop_node(node_id);
             }
         }
@@ -543,6 +550,7 @@ impl<'doc> DocumentMutator<'doc> {
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, true);
+            node.flags.insert(NodeFlags::WAS_IN_DOCUMENT);
             node.insert_damage(ALL_DAMAGE);
 
             // If the node has an "id" attribute, store it in the ID map.

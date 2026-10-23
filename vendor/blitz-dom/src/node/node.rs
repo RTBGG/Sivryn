@@ -44,6 +44,9 @@ bitflags! {
         const IS_TABLE_ROOT = 0b00000010;
         /// Whether the node is "in the document" (~= has a parent and isn't a template node)
         const IS_IN_DOCUMENT = 0b00000100;
+        /// Sivryn patch: the node has been in the document at some point.
+        /// Template nodes never are.
+        const WAS_IN_DOCUMENT = 0b00001000;
     }
 }
 

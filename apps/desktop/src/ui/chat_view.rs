@@ -663,6 +663,17 @@ fn last_own_message(state: AppState, channel: ChannelId) -> Option<MessageId> {
     state.messages.peek().get(&channel)?.iter().rev().find(|m| m.author == me && m.content.is_some()).map(|m| m.id)
 }
 
+/// The `id` of a channel's message box.
+pub fn composer_id(channel: ChannelId) -> String {
+    format!("composer-{channel}")
+}
+
+/// Puts the cursor back into a channel's message box (at the end).
+pub fn focus_composer(channel: ChannelId) {
+    blitz_dom::input_editing::request_focus(&composer_id(channel));
+    blitz_shell::canvas_frames::request_frame();
+}
+
 /// A suggestion while typing `@` or `#`.
 #[derive(Clone, PartialEq)]
 struct Suggestion {
@@ -869,6 +880,13 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                         // Opening a chat puts the cursor here (the view is
                         // rebuilt per channel, so this applies to each one).
                         autofocus: "true",
+                        id: "{composer_id(channel)}",
+                        onmousedown: move |e| {
+                            if let Some((x, y)) = super::menu::right_click(&e) {
+                                e.stop_propagation();
+                                super::menu::open(state, x, y, super::menu::text_input_items());
+                            }
+                        },
                         value: "{composer.draft}",
                         placeholder: "{placeholder}",
                         oninput: move |e| {

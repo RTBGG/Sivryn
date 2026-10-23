@@ -38,6 +38,17 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/events/driver.rs`: mouse presses and releases hit-test again instead of reusing the node
   from the last move. After the layout changed under a still pointer, clicks went to a stale or
   removed node and were lost.
+- `src/input_editing.rs` (+ `events/mouse.rs`, `events/mod.rs`, `events/driver.rs`): in text
+  inputs a double click selects a word and a triple click everything; a drag selection keeps
+  going when the pointer leaves the input, and releasing it over another element doesn't click
+  that element; only the main button moves the caret; a right click records the input and
+  whether it has a selection, so the app can offer Copy, Cut and Paste (`request`), which
+  blitz-shell runs as the matching Ctrl key; `request_focus` focuses an input by its `id`.
+- `src/node/node.rs`, `src/mutator.rs` (`remove_node_if_unparented`): only drops nodes that were
+  in the document once (`WAS_IN_DOCUMENT`). dioxus-native-dom calls it with stale element-id
+  mappings; once the slab reused such a key for a cached template node, the template was dropped
+  and its next use crashed ("invalid key" in `deep_clone_node`, a missing child in
+  `node_at_path`).
 - `src/scrollbar.rs` (+ `lib.rs`): vertical scroll bars, which Blitz didn't have. Elements with
   `overflow-y: auto | scroll` and overflowing content get a thin bar over their right edge (no
   layout space). blitz-paint draws it, blitz-shell passes the mouse to it: the thumb can be

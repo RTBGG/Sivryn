@@ -61,6 +61,8 @@ pub enum MenuAction {
     SetRole(GuildId, UserId, RoleId, bool),
     /// Move someone to another voice channel.
     MoveToVoice(GuildId, UserId, ChannelId),
+    /// Cut, copy, paste or select all in a text input.
+    EditText(blitz_dom::input_editing::Edit),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -397,6 +399,23 @@ pub fn status_items(state: AppState) -> Vec<MenuItem> {
 }
 
 /// Copying or saving an image in a message.
+/// Cut, Copy, Paste and Select all for the text input under a right click.
+pub fn text_input_items() -> Vec<MenuItem> {
+    use blitz_dom::input_editing::{Edit, context};
+    let selected = context().unwrap_or(false);
+    let clipboard = arboard::Clipboard::new().and_then(|mut c| c.get_text()).is_ok_and(|t| !t.is_empty());
+    let mut items = Vec::new();
+    if selected {
+        items.push(MenuItem::action(t("menu.cut"), Icon::Scissors, MenuAction::EditText(Edit::Cut)));
+        items.push(MenuItem::action(t("menu.copy"), Icon::Copy, MenuAction::EditText(Edit::Copy)));
+    }
+    if clipboard {
+        items.push(MenuItem::action(t("menu.paste"), Icon::Clipboard, MenuAction::EditText(Edit::Paste)));
+    }
+    items.push(MenuItem::action(t("menu.select_all"), Icon::Check, MenuAction::EditText(Edit::SelectAll)));
+    items
+}
+
 pub fn image_items(attachment: &Attachment) -> Vec<MenuItem> {
     vec![
         MenuItem::action(t("media.copy_image"), Icon::Copy, MenuAction::CopyImage(attachment.clone())),
@@ -443,6 +462,10 @@ pub fn run(mut state: AppState, action: MenuAction) {
         MenuAction::React(channel, message) => super::emoji_picker::open_for_reaction(state, channel, message),
         MenuAction::QuickReact(channel, message, emoji) => {
             super::chat_view::toggle_reaction(state, channel, message, emoji)
+        }
+        MenuAction::EditText(edit) => {
+            blitz_dom::input_editing::request(edit);
+            blitz_shell::canvas_frames::request_frame();
         }
         MenuAction::Copy(text) => {
             copy_to_clipboard(&text);

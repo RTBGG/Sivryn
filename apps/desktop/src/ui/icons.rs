@@ -46,6 +46,8 @@ pub enum Icon {
     ChevronRight,
     CirclePlus,
     Copy,
+    Clipboard,
+    Scissors,
     Download,
     External,
     File,
@@ -187,6 +189,17 @@ fn shapes(icon: Icon) -> &'static [Shape] {
         Icon::Ban => &[Circle(12.0, 12.0, 10.0), Path("m4.9 4.9 14.2 14.2")],
         Icon::ChevronRight => &[Path("m9 18 6-6-6-6")],
         Icon::CirclePlus => &[Circle(12.0, 12.0, 10.0), Path("M8 12h8"), Path("M12 8v8")],
+        Icon::Clipboard => &[
+            Rect(8.0, 2.0, 8.0, 4.0, 1.0),
+            Path("M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"),
+        ],
+        Icon::Scissors => &[
+            Circle(6.0, 6.0, 3.0),
+            Circle(6.0, 18.0, 3.0),
+            Path("M20 4 8.12 15.88"),
+            Path("M14.47 14.48 20 20"),
+            Path("M8.12 8.12 12 12"),
+        ],
         Icon::Copy => {
             &[Rect(8.0, 8.0, 14.0, 14.0, 2.0), Path("M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2")]
         }

@@ -202,6 +202,13 @@ impl<Rend: WindowRenderer> View<Rend> {
         if crate::canvas_frames::take_pending() {
             self.request_redraw();
         }
+        // Sivryn patch: Copy, Cut or Paste from the app's context menu.
+        if let Some((node, edit)) = blitz_dom::input_editing::take_request() {
+            self.run_edit(node, edit);
+        }
+        if self.doc.apply_focus_request() {
+            self.request_redraw();
+        }
         if let Some(waker) = &self.waker {
             let cx = std::task::Context::from_waker(waker);
             if self.doc.poll(Some(cx)) {
@@ -224,6 +231,29 @@ impl<Rend: WindowRenderer> View<Rend> {
         if self.renderer.is_active() {
             self.window.request_redraw();
         }
+    }
+
+    /// Sivryn patch: an edit on a text input, sent as its Ctrl key so the
+    /// input's own handling (clipboard, input event) applies.
+    fn run_edit(&mut self, node: usize, edit: blitz_dom::input_editing::Edit) {
+        use blitz_traits::events::{BlitzKeyEvent, KeyState};
+        use keyboard_types::{Code, Key, Location, Modifiers};
+        if self.doc.get_node(node).is_none() {
+            return;
+        }
+        self.doc.set_focus_to(node);
+        let event = BlitzKeyEvent {
+            key: Key::Character(edit.key().into()),
+            code: Code::Unidentified,
+            modifiers: Modifiers::CONTROL,
+            location: Location::Standard,
+            is_auto_repeating: false,
+            is_composing: false,
+            state: KeyState::Pressed,
+            text: None,
+        };
+        self.doc.handle_ui_event(UiEvent::KeyDown(event));
+        self.request_redraw();
     }
 
     /// Sivryn patch: applies pending wheel and autoscroll movement.

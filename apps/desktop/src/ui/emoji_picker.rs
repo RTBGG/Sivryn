@@ -33,6 +33,8 @@ fn choose(mut state: AppState, target: PickerTarget, emoji: &str) {
         // Stays open, so several emoji can be added in a row.
         PickerTarget::Composer(channel) => {
             state.composer.write().entry(channel).or_default().draft.push_str(emoji);
+            // Back into the message box, right after the emoji.
+            super::chat_view::focus_composer(channel);
         }
     }
 }

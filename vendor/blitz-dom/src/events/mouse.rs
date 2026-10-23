@@ -18,6 +18,29 @@ pub(crate) fn handle_mousemove(
 ) -> bool {
     let mut changed = doc.set_hover_to(x, y);
 
+    // Sivryn patch: a drag that started in a text input keeps selecting
+    // there, wherever the pointer is now.
+    if let Some(input) = crate::input_editing::dragging()
+        && buttons != MouseEventButtons::None
+        && let Some(node) = doc.nodes.get(input)
+        && node.element_data().is_some_and(|e| e.text_input_data().is_some())
+    {
+        let origin = node.absolute_position(0.0, 0.0);
+        let layout = &node.final_layout;
+        let scale = doc.viewport.scale_f64();
+        let local_x = (x - origin.x - layout.padding.left - layout.border.left) as f64 * scale;
+        let local_y = (y - origin.y - layout.padding.top - layout.border.top) as f64 * scale;
+        let node = &mut doc.nodes[input];
+        if let Some(input_data) = node.data.downcast_element_mut().and_then(|e| e.text_input_data_mut()) {
+            input_data
+                .editor
+                .driver(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx)
+                .extend_selection_to_point(local_x as f32, local_y as f32);
+            crate::caret::reset();
+        }
+        return true;
+    }
+
     let Some(hit) = doc.hit(x, y) else {
         return changed;
     };
@@ -90,10 +113,15 @@ pub(crate) fn handle_mousedown(doc: &mut BaseDocument, target: usize, x: f32, y:
         let x = (hit.x - content_box_offset.x) as f64 * doc.viewport.scale_f64();
         let y = (hit.y - content_box_offset.y) as f64 * doc.viewport.scale_f64();
 
-        text_input_data
-            .editor
-            .driver(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx)
-            .move_to_point(x as f32, y as f32);
+        // Sivryn patch: a double click selects a word, a triple click all.
+        let mut font_ctx = doc.font_ctx.lock().unwrap();
+        let mut driver = text_input_data.editor.driver(&mut font_ctx, &mut doc.layout_ctx);
+        match crate::input_editing::press(target, hit.x, hit.y) {
+            1 => driver.move_to_point(x as f32, y as f32),
+            2 => driver.select_word_at_point(x as f32, y as f32),
+            _ => driver.select_all(),
+        }
+        drop(font_ctx);
 
         doc.set_focus_to(hit.node_id);
     }
@@ -126,8 +154,12 @@ pub(crate) fn handle_mouseup<F: FnMut(DomEvent)>(
     //         || doc.non_anon_ancestor_if_anon(mouse_down_id) == doc.non_anon_ancestor_if_anon(target)
     // });
 
+    // Sivryn patch: releasing a drag selection over another element (e.g. the
+    // chat's "+" button) doesn't click it.
+    let selected_elsewhere = event.button == MouseEventButton::Main && crate::input_editing::release(target);
+
     // Dispatch a click event
-    if do_click && event.button == MouseEventButton::Main {
+    if do_click && !selected_elsewhere && event.button == MouseEventButton::Main {
         dispatch_event(DomEvent::new(target, DomEventData::Click(event.clone())));
     }
 }
