@@ -222,9 +222,11 @@ impl BaseDocument {
     pub fn node_layout_ancestors(&self, node_id: usize) -> Vec<usize> {
         let mut ancestors = Vec::with_capacity(12);
         let mut maybe_id = Some(node_id);
-        while let Some(id) = maybe_id {
-            ancestors.push(id);
-            maybe_id = self.nodes[id].layout_parent.get();
+        // Sivryn patch: a node that is gone ends the path (upstream panicked
+        // on the invalid key, e.g. for a hovered menu item that was removed).
+        while let Some(node) = maybe_id.and_then(|id| self.nodes.get(id)) {
+            ancestors.push(node.id);
+            maybe_id = node.layout_parent.get();
         }
         ancestors.reverse();
         ancestors

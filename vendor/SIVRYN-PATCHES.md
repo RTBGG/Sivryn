@@ -31,6 +31,10 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
   mention.
 - `src/stylo_to_cursor_icon.rs`: `cursor: none` falls back to the default pointer; upstream hit a
   `todo!()` and crashed the app.
+- `src/document.rs` (`forget_removed_nodes`, + `mutator.rs`), `src/traversal.rs`
+  (`node_layout_ancestors`): removing nodes clears hover, active, mousedown and focus references
+  to them, and a missing node ends an ancestor path. The hovered item of a menu that closed on
+  click stayed "hovered" and the next mouse move panicked with "invalid key".
 - `src/events/driver.rs`: mouse presses and releases hit-test again instead of reusing the node
   from the last move. After the layout changed under a still pointer, clicks went to a stale or
   removed node and were lost.

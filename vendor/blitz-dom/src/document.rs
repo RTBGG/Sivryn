@@ -528,6 +528,24 @@ impl BaseDocument {
         new_node_id
     }
 
+    /// Sivryn patch: forgets hover, active, mousedown and focus references to
+    /// nodes that were removed. They outlived their node (e.g. the hovered
+    /// item of a menu that closed on click) and the next mouse move crashed
+    /// on the invalid key.
+    pub(crate) fn forget_removed_nodes(&mut self) {
+        let nodes = &self.nodes;
+        for id in [
+            &mut self.hover_node_id,
+            &mut self.active_node_id,
+            &mut self.mousedown_node_id,
+            &mut self.focus_node_id,
+        ] {
+            if id.is_some_and(|i| !nodes.contains(i)) {
+                *id = None;
+            }
+        }
+    }
+
     pub(crate) fn remove_and_drop_pe(&mut self, node_id: usize) -> Option<Node> {
         fn remove_pe_ignoring_parent(doc: &mut BaseDocument, node_id: usize) -> Option<Node> {
             let mut node = doc.nodes.try_remove(node_id);
@@ -540,6 +558,7 @@ impl BaseDocument {
         }
 
         let node = remove_pe_ignoring_parent(self, node_id);
+        self.forget_removed_nodes();
 
         // Update child_idx values
         if let Some(parent_id) = node.as_ref().and_then(|node| node.parent) {
@@ -1237,7 +1256,7 @@ impl BaseDocument {
 
     pub fn get_cursor(&self) -> Option<CursorIcon> {
         // todo: cache this on the node itself
-        let node = &self.nodes[self.get_hover_node_id()?];
+        let node = self.nodes.get(self.get_hover_node_id()?)?;
 
         let style = node.primary_styles()?;
         let keyword = stylo_to_cursor_icon(style.clone_cursor().keyword);

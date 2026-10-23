@@ -349,6 +349,7 @@ impl DocumentMutator<'_> {
         self.process_removed_subtree(node_id);
 
         let node = self.remove_node_ignoring_parent(node_id);
+        self.doc.forget_removed_nodes();
 
         // Update child_idx values
         if let Some(parent_id) = node.as_ref().and_then(|node| node.parent) {
@@ -386,6 +387,7 @@ impl DocumentMutator<'_> {
             self.process_removed_subtree(child_id);
             let _ = self.remove_node_ignoring_parent(child_id);
         }
+        self.doc.forget_removed_nodes();
         self.maybe_record_node(node_id);
     }
 
