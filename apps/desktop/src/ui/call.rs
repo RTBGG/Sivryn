@@ -21,7 +21,7 @@ use super::{AppState, CallState, Focus, Modal, Participant, Services};
 use crate::chat;
 use crate::i18n::t;
 use crate::settings::{SCREEN_FPS, ScreenResolution};
-use crate::video_surface::VideoSurface;
+use crate::video_surface::{SharedView, VideoSurface, View};
 
 /// Joins a voice channel and shows it, after asking when that means leaving
 /// another one (unless the user turned the question off).
@@ -579,11 +579,17 @@ fn ParticipantTile(
     let state = use_context::<AppState>();
     let call_channel = state.call.read().as_ref().map(|c| c.channel);
     let id: Option<sivryn_client_core::protocol::UserId> = participant.identity.parse().ok();
-    let class = match (large, speaking) {
-        (true, true) => "tile participant large speaking",
+    let class = match (large, camera.is_some()) {
+        (true, true) => "tile participant large has-video",
         (true, false) => "tile participant large",
-        (false, true) => "tile participant speaking",
+        (false, true) => "tile participant has-video",
         (false, false) => "tile participant",
+    };
+    // A camera tile takes the video's shape, so no grey bars remain beside it.
+    let aspect = use_video_aspect(camera.clone());
+    let style = match (aspect, large) {
+        (Some(a), false) => format!("width: auto; aspect-ratio: {a:.4};"),
+        _ => String::new(),
     };
     let (identity, sharing) = (participant.identity.clone(), participant.sharing);
     // The name on this server (nickname or display name).
@@ -608,7 +614,7 @@ fn ParticipantTile(
     let (hovered, mark) = super::widgets::use_hover();
     let camera_sid = camera.as_ref().map(|f| f.track_sid.clone());
     rsx! {
-        div { class: "{class}",
+        div { class: "{class}", style: "{style}",
             onmousemove: mark,
             // Left click shows this person large (again: back to the grid).
             onclick: move |_| toggle_focus(state, focus_key.clone()),
@@ -639,8 +645,38 @@ fn ParticipantTile(
             if let (true, Some(sid)) = (hovered, camera_sid) {
                 FullscreenButton { sid }
             }
+            // A ring over the picture; a background or inset shadow was
+            // hidden behind the video or showed as a green fill.
+            if speaking {
+                div { class: "speaking-ring" }
+            }
         }
     }
+}
+
+/// The width-to-height ratio of a camera's picture, once frames arrive.
+fn use_video_aspect(camera: Option<VideoFeed>) -> Option<f32> {
+    let mut current = use_signal(|| camera.clone());
+    if *current.peek() != camera {
+        current.set(camera);
+    }
+    let mut aspect = use_signal(|| None::<f32>);
+    use_future(move || async move {
+        loop {
+            let now = current.peek().as_ref().and_then(|feed| {
+                feed.frames.borrow().as_ref().filter(|f| f.height > 0).map(|f| f.width as f32 / f.height as f32)
+            });
+            let changed = match (*aspect.peek(), now) {
+                (Some(old), Some(new)) => (old - new).abs() > 0.01,
+                (old, new) => old.is_some() != new.is_some(),
+            };
+            if changed {
+                aspect.set(now);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    *aspect.read()
 }
 
 /// Shows a tile's video over the whole screen (on hover, top right).
@@ -679,6 +715,81 @@ fn toggle_focus(mut state: AppState, key: Focus) {
     }
 }
 
+/// Zoom steps for a screen share (mouse wheel over the large tile).
+const ZOOM_STEPS: [f32; 6] = [1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+/// Width of the overview in the corner while zoomed (CSS pixels).
+const MINIMAP_WIDTH: f32 = 200.0;
+
+static NEXT_ZOOM_TARGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// The zoomable tile under the mouse, which takes wheel notches.
+static ZOOM_TARGET: std::sync::Mutex<Option<(u64, tokio::sync::mpsc::UnboundedSender<f64>)>> =
+    std::sync::Mutex::new(None);
+
+/// The window's wheel handler: zooms the screen share under the mouse.
+pub fn wheel_zoom(notches: f64) -> bool {
+    let target = ZOOM_TARGET.lock().unwrap_or_else(|e| e.into_inner());
+    target.as_ref().is_some_and(|(_, tx)| tx.send(notches).is_ok())
+}
+
+fn set_zoom_target(id: u64, target: Option<&tokio::sync::mpsc::UnboundedSender<f64>>) {
+    let mut current = ZOOM_TARGET.lock().unwrap_or_else(|e| e.into_inner());
+    match target {
+        Some(tx) if current.as_ref().is_none_or(|(i, _)| *i != id) => *current = Some((id, tx.clone())),
+        None if current.as_ref().is_some_and(|(i, _)| *i == id) => *current = None,
+        _ => {}
+    }
+}
+
+/// The next zoom step up (notches > 0) or down.
+fn step_zoom(zoom: f32, notches: f64) -> f32 {
+    let at = ZOOM_STEPS.iter().rposition(|z| *z <= zoom + 1e-3).unwrap_or(0);
+    let next = if notches > 0.0 { (at + 1).min(ZOOM_STEPS.len() - 1) } else { at.saturating_sub(1) };
+    ZOOM_STEPS[next]
+}
+
+/// Dragging the frame in the overview.
+#[derive(Clone, Copy)]
+struct MinimapDrag {
+    view: Signal<View>,
+    /// Where the drag started (client coordinates) and the centre then.
+    start: (f64, f64),
+    centre: (f32, f32),
+    /// The overview's size in CSS pixels.
+    size: (f32, f32),
+}
+
+thread_local! {
+    static MINIMAP_DRAG: std::cell::Cell<Option<MinimapDrag>> = const { std::cell::Cell::new(None) };
+}
+
+/// Called by the window root on every mouse move: moves a dragged frame.
+pub fn minimap_pointer_move(e: &MouseEvent) {
+    MINIMAP_DRAG.with(|d| {
+        let Some(MinimapDrag { mut view, start, centre, size }) = d.get() else { return };
+        // The button was let go somewhere else.
+        if e.held_buttons().is_empty() {
+            d.set(None);
+            return;
+        }
+        let p = e.client_coordinates();
+        let dx = (p.x - start.0) as f32 / size.0;
+        let dy = (p.y - start.1) as f32 / size.1;
+        let mut next = *view.peek();
+        next.centre = (centre.0 + dx, centre.1 + dy);
+        // Keep the centre where the frame stays inside the picture.
+        let ((u0, v0), (u1, v1)) = next.bounds();
+        next.centre = ((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+        if next != *view.peek() {
+            view.set(next);
+        }
+    });
+}
+
+/// Called by the window root when the mouse button is released.
+pub fn minimap_pointer_up() {
+    MINIMAP_DRAG.with(|d| d.set(None));
+}
+
 #[component]
 fn VideoTile(feed: VideoFeed, large: bool) -> Element {
     let state = use_context::<AppState>();
@@ -687,12 +798,52 @@ fn VideoTile(feed: VideoFeed, large: bool) -> Element {
     let sid = feed.track_sid.clone();
     let full_sid = feed.track_sid.clone();
     let (hovered, mark) = super::widgets::use_hover();
+
+    // Zoom (wheel over the large tile) and the shown part, shared with the
+    // video surface.
+    let mut view = use_signal(View::default);
+    let shared = use_hook(SharedView::default);
+    let zoom_id = use_hook(|| NEXT_ZOOM_TARGET.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let zoom_tx = use_hook(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
+        spawn(async move {
+            while let Some(notches) = rx.recv().await {
+                let mut next = *view.peek();
+                next.zoom = step_zoom(next.zoom, notches);
+                if next != *view.peek() {
+                    view.set(next);
+                }
+            }
+        });
+        tx
+    });
+    if !large && *view.peek() != View::default() {
+        view.set(View::default());
+    }
+    set_zoom_target(zoom_id, (hovered && large).then_some(&zoom_tx));
+    use_drop(move || set_zoom_target(zoom_id, None));
+    let current = *view.read();
+    if shared.set(current) {
+        blitz_shell::canvas_frames::request_frame();
+    }
+    let aspect = use_video_aspect(Some(feed.clone())).unwrap_or(16.0 / 9.0);
+    let (map_w, map_h) = (MINIMAP_WIDTH, MINIMAP_WIDTH / aspect);
+    let ((u0, v0), (u1, v1)) = current.bounds();
+    let frame_style = format!(
+        "left: {:.1}px; top: {:.1}px; width: {:.1}px; height: {:.1}px;",
+        u0 * map_w,
+        v0 * map_h,
+        (u1 - u0) * map_w,
+        (v1 - v0) * map_h
+    );
+    let minimap_feed = feed.clone();
+
     rsx! {
         div {
             class: if large { "tile screen large" } else { "tile screen" },
             onmousemove: mark,
             onclick: move |_| toggle_focus(state, Focus::Screen(sid.clone())),
-            VideoCanvas { feed }
+            VideoCanvas { feed, view: Some(shared.clone()) }
             div { class: "name-tag",
                 Svg { icon: Icon::Monitor, size: 13 }
                 span { "{name}" }
@@ -700,14 +851,36 @@ fn VideoTile(feed: VideoFeed, large: bool) -> Element {
             if hovered {
                 FullscreenButton { sid: full_sid }
             }
+            // While zoomed: the whole picture with a frame for the shown part,
+            // which can be dragged around.
+            if current.zoom > 1.0 {
+                div {
+                    class: "minimap",
+                    style: "width: {map_w:.0}px; height: {map_h:.0}px;",
+                    onclick: move |e| e.stop_propagation(),
+                    onmousedown: move |e| {
+                        e.stop_propagation();
+                        let p = e.client_coordinates();
+                        let centre = view.peek().centre;
+                        let drag = MinimapDrag { view, start: (p.x, p.y), centre, size: (map_w, map_h) };
+                        MINIMAP_DRAG.with(|d| d.set(Some(drag)));
+                    },
+                    VideoCanvas { feed: minimap_feed }
+                    div { class: "minimap-frame", style: "{frame_style}" }
+                    div { class: "minimap-zoom", "{current.zoom}×" }
+                }
+            }
         }
     }
 }
 
 #[component]
-fn VideoCanvas(feed: VideoFeed) -> Element {
+fn VideoCanvas(feed: VideoFeed, #[props(default)] view: Option<SharedView>) -> Element {
     let frames = feed.frames.clone();
-    let paint_source = use_wgpu(move || VideoSurface::new(frames));
+    let paint_source = use_wgpu(move || match view {
+        Some(view) => VideoSurface::new(frames).with_view(view),
+        None => VideoSurface::new(frames),
+    });
     rsx! {
         canvas { class: "video", "src": "{paint_source}" }
     }
@@ -1076,5 +1249,22 @@ pub async fn afk_watch(state: AppState) {
                 Err(e) => state.report(Err(e)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_goes_in_steps_and_stays_in_the_picture() {
+        assert_eq!(step_zoom(1.0, 1.0), 1.5);
+        assert_eq!(step_zoom(1.5, 3.0), 2.0);
+        assert_eq!(step_zoom(6.0, 1.0), 6.0);
+        assert_eq!(step_zoom(2.0, -1.0), 1.5);
+        assert_eq!(step_zoom(1.0, -1.0), 1.0);
+        // At 2× the shown half can't move past the edges.
+        let view = View { zoom: 2.0, centre: (0.95, 0.1) };
+        assert_eq!(view.bounds(), ((0.5, 0.0), (1.0, 0.5)));
     }
 }

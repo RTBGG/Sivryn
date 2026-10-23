@@ -67,6 +67,14 @@ impl Config {
             },
         };
 
+        let defaults = CameraLimits::default();
+        let camera = CameraLimits {
+            max_width: parse_or("SIVRYN_CAMERA_MAX_WIDTH", defaults.max_width)?,
+            max_height: parse_or("SIVRYN_CAMERA_MAX_HEIGHT", defaults.max_height)?,
+            max_fps: parse_or("SIVRYN_CAMERA_MAX_FPS", defaults.max_fps)?,
+            max_bitrate_bps: parse_or("SIVRYN_CAMERA_MAX_BITRATE", defaults.max_bitrate_bps)?,
+        };
+
         let oidc = match env::var("SIVRYN_OIDC_ISSUER") {
             Ok(issuer_url) => Some(OidcConfig {
                 issuer_url,
@@ -92,7 +100,7 @@ impl Config {
                 api_secret: required("LIVEKIT_API_SECRET")?,
             },
             screen_share,
-            camera: CameraLimits::default(),
+            camera,
             nats_url: env::var("SIVRYN_NATS_URL").ok().filter(|s| !s.is_empty()),
             oidc,
             files_dir: var_or("SIVRYN_FILES_DIR", "/data/files").into(),

@@ -59,6 +59,7 @@ pub enum CameraQuality {
     #[default]
     P1080_30,
     P720_60,
+    P1080_60,
 }
 
 impl CameraQuality {
@@ -67,6 +68,17 @@ impl CameraQuality {
             CameraQuality::P720_30 => (1280, 720, 30),
             CameraQuality::P1080_30 => (1920, 1080, 30),
             CameraQuality::P720_60 => (1280, 720, 60),
+            CameraQuality::P1080_60 => (1920, 1080, 60),
+        }
+    }
+
+    /// Bitrate for a clean picture at this size and frame rate (bits/s).
+    pub fn bitrate(self) -> u64 {
+        match self {
+            CameraQuality::P720_30 => 2_500_000,
+            CameraQuality::P720_60 => 4_000_000,
+            CameraQuality::P1080_30 => 5_000_000,
+            CameraQuality::P1080_60 => 8_000_000,
         }
     }
 }
@@ -117,7 +129,10 @@ impl CameraShare {
             source: TrackSource::Camera,
             video_codec: codec,
             video_encoder: backend,
-            video_encoding: Some(VideoEncoding { max_bitrate: limits.max_bitrate_bps, max_framerate: fps as f64 }),
+            video_encoding: Some(VideoEncoding {
+                max_bitrate: quality.bitrate().min(limits.max_bitrate_bps),
+                max_framerate: fps as f64,
+            }),
             simulcast: true,
             ..Default::default()
         };
@@ -182,6 +197,11 @@ fn pick_format(formats: &[CameraFormat], (w, h, fps): (u32, u32, u32)) -> Option
         .copied()
 }
 
+/// Largest size of the local camera preview and its shortest frame interval
+/// (at most 60 fps, like the camera).
+const PREVIEW_MAX: (u32, u32) = (1280, 720);
+const PREVIEW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
+
 async fn spawn_capture(
     camera: CameraDevice,
     target: (u32, u32, u32),
@@ -225,16 +245,27 @@ async fn spawn_capture(
                     }
                 };
                 let res = frame.resolution();
-                let Some(i420) = to_i420(frame.source_frame_format(), frame.buffer(), res.width(), res.height()) else {
+                let Some(mut i420) = to_i420(frame.source_frame_format(), frame.buffer(), res.width(), res.height())
+                else {
                     continue;
                 };
-                // Preview at ~15 fps is plenty for a self view.
-                if last_preview.elapsed().as_millis() >= 66 {
+                // The self view at the camera's frame rate (15 fps looked
+                // choppy), at most 720p: it is shown small.
+                if last_preview.elapsed() >= PREVIEW_INTERVAL && preview.receiver_count() > 0 {
                     last_preview = Instant::now();
-                    let (pw, ph) = (i420.width(), i420.height());
+                    let (w, h) = (i420.width(), i420.height());
+                    let shrink = (PREVIEW_MAX.0 as f64 / w as f64).min(PREVIEW_MAX.1 as f64 / h as f64).min(1.0);
+                    let (pw, ph) = (((w as f64 * shrink) as u32) & !1, ((h as f64 * shrink) as u32) & !1);
+                    let scaled;
+                    let source = if (pw, ph) != (w, h) {
+                        scaled = i420.scale(pw as i32, ph as i32);
+                        &scaled
+                    } else {
+                        &i420
+                    };
                     let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-                    let (sy, su, sv) = i420.strides();
-                    let (y, u, v) = i420.data();
+                    let (sy, su, sv) = source.strides();
+                    let (y, u, v) = source.data();
                     yuv_helper::i420_to_abgr(y, sy, u, su, v, sv, &mut rgba, pw * 4, pw as i32, ph as i32);
                     let _ = preview.send(Some(Arc::new(crate::RgbaFrame { width: pw, height: ph, data: rgba })));
                 }

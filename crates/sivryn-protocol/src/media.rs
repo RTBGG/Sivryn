@@ -50,7 +50,7 @@ pub struct CameraLimits {
 
 impl Default for CameraLimits {
     fn default() -> Self {
-        Self { max_width: 1280, max_height: 720, max_fps: 30, max_bitrate_bps: 2_500_000 }
+        Self { max_width: 1920, max_height: 1080, max_fps: 60, max_bitrate_bps: 8_000_000 }
     }
 }
 

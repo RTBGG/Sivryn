@@ -630,7 +630,45 @@ h1, h2, h3 { margin: 0; }
   cursor: pointer;
 }
 .stage.focus .stage-grid .tile { width: 200px; height: 113px; }
-.tile.participant.speaking { box-shadow: inset 0 0 0 3px var(--green); }
+.speaking-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 3px solid var(--green);
+  border-radius: 16px;
+}
+.tile.large .speaking-ring { border-radius: 0; }
+/* Overview of a zoomed screen share: the whole picture, a frame for the shown part. */
+.minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  overflow: hidden;
+  border: 1px solid #ffffff59;
+  border-radius: 6px;
+  background: #000000;
+  cursor: grab;
+}
+.minimap-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #ffffff;
+  border-radius: 2px;
+  background: #ffffff1f;
+}
+.minimap-zoom {
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+/* A camera picture fills its tile; no grey behind it. */
+.tile.participant.has-video { background: transparent; }
 .tile.screen { background: #000000; }
 .tile.screen.large { width: 100%; height: auto; aspect-ratio: 16 / 9; max-height: 100%; }
 .tile-avatar { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }

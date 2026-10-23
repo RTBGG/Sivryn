@@ -6,7 +6,9 @@
 //!   down to scroll (faster the further away), any click ends it. Holding the
 //!   wheel and releasing it after moving also ends it, like in browsers.
 //! - Ctrl+wheel goes to a handler the app installs ([`set_ctrl_wheel_handler`])
-//!   instead of scrolling, e.g. to zoom an image.
+//!   instead of scrolling, e.g. to zoom an image. The plain wheel goes to
+//!   [`set_wheel_handler`]'s handler first, which can take it (e.g. to zoom a
+//!   screen share under the mouse).
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -31,6 +33,18 @@ pub fn set_ctrl_wheel_handler(handler: impl Fn(f64) -> bool + Send + Sync + 'sta
 
 pub(crate) fn ctrl_wheel(notches: f64) -> bool {
     CTRL_WHEEL.get().is_some_and(|h| h(notches))
+}
+
+static WHEEL: OnceLock<CtrlWheel> = OnceLock::new();
+
+/// Installs a handler that sees every plain wheel notch first (positive =
+/// up) and returns whether it used it; otherwise the page scrolls.
+pub fn set_wheel_handler(handler: impl Fn(f64) -> bool + Send + Sync + 'static) {
+    let _ = WHEEL.set(Box::new(handler));
+}
+
+pub(crate) fn wheel(notches: f64) -> bool {
+    WHEEL.get().is_some_and(|h| h(notches))
 }
 
 /// Wheel scrolling still to be applied, per node.

@@ -540,6 +540,7 @@ fn VideoPage() -> Element {
         CameraQuality::P720_30 => "720",
         CameraQuality::P1080_30 => "1080",
         CameraQuality::P720_60 => "720-60",
+        CameraQuality::P1080_60 => "1080-60",
     };
 
     rsx! {
@@ -563,10 +564,16 @@ fn VideoPage() -> Element {
             Field { label: t("video.camera_quality").to_string(),
                 Segmented {
                     value: quality.to_string(),
-                    options: vec![opt("720", "720p · 30"), opt("1080", "1080p · 30"), opt("720-60", "720p · 60")],
+                    options: vec![
+                        opt("720", "720p · 30"),
+                        opt("720-60", "720p · 60"),
+                        opt("1080", "1080p · 30"),
+                        opt("1080-60", "1080p · 60"),
+                    ],
                     onchange: move |v: String| state.update_settings(|s| s.video.camera_quality = match v.as_str() {
                         "720" => CameraQuality::P720_30,
                         "720-60" => CameraQuality::P720_60,
+                        "1080-60" => CameraQuality::P1080_60,
                         _ => CameraQuality::P1080_30,
                     }),
                 }

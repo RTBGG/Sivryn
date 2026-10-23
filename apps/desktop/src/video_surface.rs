@@ -9,7 +9,8 @@ use sivryn_media::RgbaFrame;
 use tokio::sync::watch;
 
 const SHADER: &str = r#"
-struct Rect { top_left: vec2<f32>, bottom_right: vec2<f32> };
+// Where the picture goes in clip space, and which part of the frame it shows.
+struct Rect { top_left: vec2<f32>, bottom_right: vec2<f32>, uv_min: vec2<f32>, uv_max: vec2<f32> };
 
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var frame_sampler: sampler;
@@ -29,7 +30,7 @@ fn vs(@builtin(vertex_index) index: u32) -> VertexOut {
     let c = corners[index];
     var out: VertexOut;
     out.position = vec4(mix(rect.top_left, rect.bottom_right, c), 0.0, 1.0);
-    out.uv = c;
+    out.uv = mix(rect.uv_min, rect.uv_max, c);
     return out;
 }
 
@@ -71,8 +72,60 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The part of the frame to show: a zoom factor (1 = all of it) around a
+/// centre given as fractions of the frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub zoom: f32,
+    pub centre: (f32, f32),
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self { zoom: 1.0, centre: (0.5, 0.5) }
+    }
+}
+
+impl View {
+    /// The shown part of the frame (fractions), kept inside the frame.
+    pub fn bounds(self) -> ((f32, f32), (f32, f32)) {
+        let half = 0.5 / self.zoom.max(1.0);
+        let clamp = |c: f32| c.clamp(half, 1.0 - half);
+        let (cx, cy) = (clamp(self.centre.0), clamp(self.centre.1));
+        ((cx - half, cy - half), (cx + half, cy + half))
+    }
+}
+
+/// A view the UI changes while the surface shows it (equal when shared).
+#[derive(Clone, Default)]
+pub struct SharedView(Arc<std::sync::Mutex<View>>);
+
+impl SharedView {
+    pub fn get(&self) -> View {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Changes the view; returns whether it changed.
+    pub fn set(&self, view: View) -> bool {
+        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = *current != view;
+        *current = view;
+        changed
+    }
+}
+
+impl PartialEq for SharedView {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 pub struct VideoSurface {
     frames: watch::Receiver<Option<Arc<RgbaFrame>>>,
+    /// Zoom and pan (screen shares); `None` shows the whole frame.
+    view: Option<SharedView>,
+    /// The view last drawn.
+    drawn_view: View,
     gpu: Option<Gpu>,
     logged_first_render: bool,
     /// Fill the canvas and crop the overflow instead of letterboxing.
@@ -91,7 +144,21 @@ impl VideoSurface {
                 blitz_shell::canvas_frames::request_frame();
             }
         });
-        Self { frames, gpu: None, logged_first_render: false, cover: false, repaint }
+        Self {
+            frames,
+            view: None,
+            drawn_view: View::default(),
+            gpu: None,
+            logged_first_render: false,
+            cover: false,
+            repaint,
+        }
+    }
+
+    /// Shows the part of the frame `view` says (zooming a screen share).
+    pub fn with_view(mut self, view: SharedView) -> Self {
+        self.view = Some(view);
+        self
     }
 
     /// Fills the canvas, cropping what doesn't fit (banners: rounding in
@@ -202,7 +269,7 @@ impl Gpu {
         });
         let rect = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sivryn video rect"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -261,7 +328,7 @@ impl Gpu {
         self.dirty = true;
     }
 
-    fn draw(&mut self, cover: bool) {
+    fn draw(&mut self, cover: bool, view: View) {
         let (Some((frame, bind_group)), Some(output)) = (&self.frame, &self.output) else { return };
 
         // Letterbox: fit the frame into the canvas, keeping its aspect ratio
@@ -279,7 +346,8 @@ impl Gpu {
         } else {
             (frame_aspect / canvas_aspect, 1.0)
         };
-        let rect: [f32; 4] = [-sx, sy, sx, -sy];
+        let ((u0, v0), (u1, v1)) = view.bounds();
+        let rect: [f32; 8] = [-sx, sy, sx, -sy, u0, v0, u1, v1];
         let bytes: Vec<u8> = rect.iter().flat_map(|v| v.to_ne_bytes()).collect();
         self.queue.write_buffer(&self.rect, 0, &bytes);
 
@@ -370,8 +438,13 @@ impl CustomPaintSource for VideoSurface {
             gpu.dirty = true;
         }
 
+        let view = self.view.as_ref().map(SharedView::get).unwrap_or_default();
+        if view != self.drawn_view {
+            self.drawn_view = view;
+            gpu.dirty = true;
+        }
         if gpu.dirty {
-            gpu.draw(self.cover);
+            gpu.draw(self.cover, view);
         }
         gpu.output.as_ref().map(|o| o.handle.clone())
     }

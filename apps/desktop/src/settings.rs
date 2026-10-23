@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use sivryn_client_core::protocol::media::{ContentHint, ScreenShareLimits};
-use sivryn_client_core::protocol::{CategoryId, GuildId};
+use sivryn_client_core::protocol::{CategoryId, ChannelId, GuildId};
 use sivryn_media::{AudioConfig, CameraQuality};
 
 use crate::hotkeys::Keybind;
@@ -25,6 +25,8 @@ pub struct Settings {
     /// Account that signs in automatically (its token is in the credential store).
     pub auto_login: Option<AccountId>,
     pub last_guild: Option<GuildId>,
+    /// The direct message opened last; the Sivryn logo goes back to it.
+    pub last_dm: Option<ChannelId>,
     pub audio: AudioConfig,
     /// Per-participant volume (identity, or `identity:screen` for share audio).
     pub volumes: HashMap<String, f32>,
@@ -56,6 +58,7 @@ impl Default for Settings {
             last_username: None,
             auto_login: None,
             last_guild: None,
+            last_dm: None,
             audio: AudioConfig::default(),
             volumes: HashMap::new(),
             muted_users: Default::default(),

@@ -536,7 +536,12 @@ impl AppState {
                 self.home.set(false);
                 self.guild.set(Some(guild));
             }
-            None => self.home.set(true),
+            None => {
+                self.home.set(true);
+                if self.settings.peek().last_dm != Some(channel) {
+                    self.update_settings(|s| s.last_dm = Some(channel));
+                }
+            }
         }
         self.channel.set(Some(channel));
         self.voice_chat.set(false);
@@ -546,6 +551,15 @@ impl AppState {
     pub fn open_home(mut self) {
         self.home.set(true);
         self.channel.set(None);
+    }
+
+    /// The Sivryn logo: the direct message opened last, or the friends page.
+    pub fn open_last_dm(self) {
+        let last = self.settings.peek().last_dm.filter(|id| self.dms.peek().iter().any(|d| d.channel.id == *id));
+        match last {
+            Some(channel) => self.open_channel(channel),
+            None => self.open_home(),
+        }
     }
 
     /// Opens (or creates) the DM with these users and shows it.
@@ -1302,6 +1316,7 @@ pub fn App() -> Element {
         });
         // Ctrl+wheel zooms the image viewer.
         let (zoom_tx, mut zooms) = tokio::sync::mpsc::unbounded_channel();
+        blitz_shell::scrolling::set_wheel_handler(call::wheel_zoom);
         blitz_shell::scrolling::set_ctrl_wheel_handler(move |notches| {
             media::VIEWER_OPEN.load(std::sync::atomic::Ordering::Relaxed) && zoom_tx.send(notches).is_ok()
         });

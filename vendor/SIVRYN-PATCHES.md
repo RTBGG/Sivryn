@@ -75,7 +75,8 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/scrolling.rs`, `src/window.rs`: browser-like wheel scrolling (100 px per notch, eased
   over ~45 ms instead of jumping), middle-click autoscroll (speed grows with the distance from
   where it started; any click ends it) and Ctrl+wheel going to an app handler
-  (`blitz_shell::scrolling::set_ctrl_wheel_handler`) instead of zooming the page.
+  (`blitz_shell::scrolling::set_ctrl_wheel_handler`) instead of zooming the page. A plain wheel
+  handler (`set_wheel_handler`) may take a notch before the page scrolls (zooming a screen share).
 - `src/fullscreen.rs`, `src/window.rs` (`View::init`): `blitz_shell::fullscreen::set_fullscreen`
   puts the app's windows into borderless fullscreen and back, `set_cursor_visible` hides the
   pointer; apps had no handle to their window.

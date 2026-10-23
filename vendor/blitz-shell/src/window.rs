@@ -504,6 +504,10 @@ impl<Rend: WindowRenderer> View<Rend> {
                     self.request_redraw();
                     return;
                 }
+                if !self.keyboard_modifiers.state().control_key() && crate::scrolling::wheel(notches) {
+                    self.request_redraw();
+                    return;
+                }
                 match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         let node = self.doc.get_hover_node_id();

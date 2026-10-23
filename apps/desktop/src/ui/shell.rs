@@ -27,11 +27,13 @@ pub fn Shell() -> Element {
                 super::widgets::hover_root_move();
                 super::resize::on_move(state, &e);
                 super::dnd::on_move(state, &e);
+                super::call::minimap_pointer_move(&e);
             },
             onmouseup: move |_| {
                 super::widgets::slider_pointer_up();
                 super::resize::finish(state);
                 super::dnd::finish(state);
+                super::call::minimap_pointer_up();
             },
             GuildRail {}
             div { class: "sidebar-wrap", style: "width: {super::resize::width(&state, super::resize::Pane::Sidebar)}px;",
@@ -148,7 +150,7 @@ fn GuildRail() -> Element {
         nav { class: "rail",
             div { class: "rail-entry",
                 div { class: if home { "rail-pill active" } else { "rail-pill" } }
-                div { class: if home { "rail-logo active" } else { "rail-logo" }, title: t("home.title"), onclick: move |_| state.open_home(),
+                div { class: if home { "rail-logo active" } else { "rail-logo" }, title: t("home.title"), onclick: move |_| state.open_last_dm(),
                     Logo { size: 48 }
                     if home_count > 0 {
                         span { class: "rail-badge", "{count_label(home_count)}" }

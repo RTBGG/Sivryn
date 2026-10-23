@@ -866,6 +866,9 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                     span { class: "drop-hint", Svg { icon: Icon::Upload, size: 16 } {t("chat.drop_here")} }
                 } else {
                     input {
+                        // Opening a chat puts the cursor here (the view is
+                        // rebuilt per channel, so this applies to each one).
+                        autofocus: "true",
                         value: "{composer.draft}",
                         placeholder: "{placeholder}",
                         oninput: move |e| {
