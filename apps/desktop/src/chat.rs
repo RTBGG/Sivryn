@@ -9,13 +9,18 @@
 //! Every decrypted record goes into the local store before the MLS state
 //! that consumed its key is saved, so a crash can only cause a refetch, never
 //! a lost message.
+//!
+//! In guilds that share history, messages also carry a copy sealed with the
+//! channel's history key, and whoever adds someone hands them the keys, so
+//! they can read what was written before (see `history.rs`).
 
 use sivryn_client_core::ClientError;
 use sivryn_client_core::protocol::api::{MessageQuery, MlsCommitRequest, MlsWelcome, SendMessageRequest};
-use sivryn_client_core::protocol::model::{Message, MessageContent, MessageKind, Reaction};
+use sivryn_client_core::protocol::model::{HistoryKey, Message, MessageContent, MessageKind, Reaction};
 use sivryn_client_core::protocol::{ChannelId, MessageId, UserId};
 use sivryn_crypto::{Incoming, PendingCommit};
 
+use crate::history;
 use crate::messages::Record;
 use crate::session::Session;
 
@@ -23,6 +28,8 @@ use crate::session::Session;
 pub const HISTORY_PAGE: usize = 150;
 /// Server page size when catching up.
 const CATCH_UP_PAGE: u32 = 100;
+/// How far back new history keys look for messages they unlock (pages).
+const BACKFILL_PAGES: usize = 20;
 
 fn is_conflict(e: &ClientError) -> bool {
     matches!(e, ClientError::Api { status, .. } if status.as_u16() == 409)
@@ -120,7 +127,35 @@ pub async fn add_user(s: &Session, channel: ChannelId, user: UserId) -> Result<(
     }
     let key_packages: Vec<String> = claimed.iter().map(|c| c.key_package.clone()).collect();
     let pending = s.mls.borrow_mut().add_members(channel, &key_packages).map_err(|e| e.to_string())?;
-    submit(s, channel, pending, claimed.iter().map(|c| c.device_id).collect()).await
+    let epoch = pending.epoch;
+    submit(s, channel, pending, claimed.iter().map(|c| c.device_id).collect()).await?;
+    // The new devices are in the group now: hand them the history keys.
+    if s.history_channels.borrow().contains(&channel) && s.mls.borrow().epoch(channel) > Some(epoch) {
+        let keys = s.store.history_keys(channel).map_err(|e| e.to_string())?;
+        if !keys.is_empty()
+            && let Err(e) = share_keys(s, channel, keys).await
+        {
+            tracing::warn!(error = %e, %channel, "could not hand the history keys to new members");
+        }
+    }
+    Ok(())
+}
+
+/// Sends history keys to the group (an MLS message of their own kind).
+async fn share_keys(s: &Session, channel: ChannelId, keys: Vec<HistoryKey>) -> Result<(), String> {
+    let content = MessageContent { history_keys: keys, ..Default::default() };
+    send(s, channel, content, MessageKind::HistoryKeys, None).await.map(|_| ())
+}
+
+/// Starts a new history key and hands it to the group (first message in a
+/// channel, or after someone was removed, so they can't read what follows).
+async fn new_history_key(s: &Session, channel: ChannelId) -> Result<(), String> {
+    // Kept only once handed out: a key nobody else has would seal copies
+    // nobody can open.
+    let key = history::new_key();
+    share_keys(s, channel, vec![key.clone()]).await?;
+    s.store.add_history_keys(channel, std::slice::from_ref(&key)).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Makes the channel's group match who may read the channel: adds people
@@ -151,10 +186,17 @@ pub async fn remove_users(s: &Session, channel: ChannelId, users: &[UserId]) -> 
     }
     let identities: Vec<String> = users.iter().map(|u| u.to_string()).collect();
     let pending = s.mls.borrow_mut().remove_identities(channel, &identities).map_err(|e| e.to_string())?;
-    match pending {
-        Some(pending) => submit(s, channel, pending, Vec::new()).await,
-        None => Ok(()),
+    let Some(pending) = pending else { return Ok(()) };
+    let epoch = pending.epoch;
+    submit(s, channel, pending, Vec::new()).await?;
+    // They're out: what comes next gets a key they never see.
+    if s.history_channels.borrow().contains(&channel)
+        && s.mls.borrow().epoch(channel) > Some(epoch)
+        && let Err(e) = new_history_key(s, channel).await
+    {
+        tracing::warn!(error = %e, %channel, "could not start a new history key");
     }
+    Ok(())
 }
 
 /// Encrypts and sends a message, edit or reaction. Returns it as a record
@@ -166,6 +208,20 @@ pub async fn send(
     kind: MessageKind,
     target: Option<MessageId>,
 ) -> Result<Record, String> {
+    // A copy for members who join later, sealed with the newest history key
+    // (the channel's first message starts one). Key messages need no copy.
+    let mut history = None;
+    if kind != MessageKind::HistoryKeys && s.history_channels.borrow().contains(&channel) {
+        // Without a key handed out, the message still goes (without a copy).
+        if s.store.history_keys(channel).map_err(|e| e.to_string())?.is_empty()
+            && let Err(e) = Box::pin(new_history_key(s, channel)).await
+        {
+            tracing::warn!(error = %e, %channel, "could not hand out a history key");
+        }
+        let keys = s.store.history_keys(channel).map_err(|e| e.to_string())?;
+        history =
+            history::current(&keys).and_then(|key| history::seal(key, channel, s.user.id, kind, target, &content));
+    }
     let encrypted = s.mls.borrow_mut().encrypt(channel, &content).map_err(|e| e.to_string());
     s.persist_mls();
     let (epoch, ciphertext) = encrypted?;
@@ -173,7 +229,7 @@ pub async fn send(
         .api
         .send_message(
             channel,
-            &SendMessageRequest { device_id: s.device_id, epoch, ciphertext, kind, target_id: target },
+            &SendMessageRequest { device_id: s.device_id, epoch, ciphertext, history, kind, target_id: target },
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -210,13 +266,22 @@ pub async fn delete(s: &Session, channel: ChannelId, message: MessageId) -> Resu
     Ok(())
 }
 
+/// Opens a message's history copy with the channel's history keys.
+fn open_history(s: &Session, msg: &Message) -> Option<MessageContent> {
+    let sealed = msg.history.as_deref()?;
+    let keys = s.store.history_keys(msg.channel_id).ok()?;
+    history::open(&keys, sealed, msg.channel_id, msg.author_id, msg.kind, msg.target_id)
+}
+
 /// Decrypts one record without storing it. Own messages can't be decrypted
-/// by MLS design (the store already has them).
+/// by MLS design (the store already has them). History keys in it are kept,
+/// and messages MLS can't open (sent before this device joined) are tried
+/// with them.
 fn decrypt_one(s: &Session, msg: &Message) -> Option<Record> {
     if msg.sender_device_id == s.device_id {
         return None;
     }
-    let content = match s.mls.borrow_mut().process(msg.channel_id, &msg.ciphertext) {
+    let mut content = match s.mls.borrow_mut().process(msg.channel_id, &msg.ciphertext) {
         Ok(Incoming::Message(content)) => Some(content),
         Ok(_) => return None,
         Err(e) => {
@@ -224,6 +289,19 @@ fn decrypt_one(s: &Session, msg: &Message) -> Option<Record> {
             None
         }
     };
+    if msg.kind == MessageKind::HistoryKeys {
+        // Kept apart from the messages; the record only marks it as seen.
+        let keys = content.take().map(|c| c.history_keys).unwrap_or_default();
+        match s.store.add_history_keys(msg.channel_id, &keys) {
+            Ok(true) => {
+                s.history_unlocked.borrow_mut().insert(msg.channel_id);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "could not store history keys"),
+        }
+    } else if content.is_none() {
+        content = open_history(s, msg);
+    }
     Some(Record {
         id: msg.id,
         author: msg.author_id,
@@ -236,7 +314,13 @@ fn decrypt_one(s: &Session, msg: &Message) -> Option<Record> {
 
 /// Decrypts and stores records from the server (in order).
 pub fn receive(s: &Session, channel: ChannelId, messages: &[Message]) -> Vec<Record> {
-    let records: Vec<Record> = messages.iter().filter_map(|m| decrypt_one(s, m)).collect();
+    let mut records: Vec<Record> = messages.iter().filter_map(|m| decrypt_one(s, m)).collect();
+    // Keys that came later in the same batch open the ones before them.
+    for record in records.iter_mut().filter(|r| r.content.is_none() && r.kind != MessageKind::HistoryKeys) {
+        if let Some(msg) = messages.iter().find(|m| m.id == record.id) {
+            record.content = open_history(s, msg);
+        }
+    }
     if let Err(e) = s.store.insert(channel, &records) {
         tracing::error!(error = %e, "could not store messages");
     }
@@ -258,6 +342,48 @@ pub fn apply_commit(s: &Session, channel: ChannelId, commit: &str) -> Option<u64
     };
     s.persist_mls();
     epoch
+}
+
+/// After new history keys arrived: goes back through the channel's messages
+/// on the server and stores the ones they unlock (that weren't readable or
+/// weren't here at all). Returns those records.
+pub async fn backfill(s: &Session, channel: ChannelId) -> Result<Vec<Record>, String> {
+    if !s.history_unlocked.borrow_mut().remove(&channel) {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    let mut before = None;
+    for _ in 0..BACKFILL_PAGES {
+        let page = s
+            .api
+            .messages(channel, &MessageQuery { before, limit: Some(CATCH_UP_PAGE), ..Default::default() })
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(oldest) = page.iter().map(|m| m.id).min_by_key(|id| id.0) else { break };
+        before = Some(oldest);
+        let ids: Vec<MessageId> = page.iter().map(|m| m.id).collect();
+        let readable = s.store.readable(&ids).map_err(|e| e.to_string())?;
+        let mut unlocked = Vec::new();
+        for msg in page.iter().filter(|m| !readable.contains(&m.id) && m.history.is_some()) {
+            if let Some(content) = open_history(s, msg) {
+                unlocked.push(Record {
+                    id: msg.id,
+                    author: msg.author_id,
+                    created_at: msg.created_at.timestamp_millis(),
+                    kind: msg.kind,
+                    target: msg.target_id,
+                    content: Some(content),
+                });
+            }
+        }
+        s.store.insert(channel, &unlocked).map_err(|e| e.to_string())?;
+        found.extend(unlocked);
+        // Older than history copies (sent before they existed): nothing more to find.
+        if page.len() < CATCH_UP_PAGE as usize || page.iter().all(|m| m.history.is_none()) {
+            break;
+        }
+    }
+    Ok(found)
 }
 
 /// The channel's stored history (newest [`HISTORY_PAGE`] messages).
@@ -303,5 +429,6 @@ pub async fn catch_up(s: &Session, channel: ChannelId) -> Result<Vec<Record>, St
         after = if full { page.last().map(|m| m.id) } else { None };
         new.extend(receive(s, channel, &page));
     }
+    new.extend(backfill(s, channel).await?);
     Ok(new)
 }

@@ -69,13 +69,18 @@ pub async fn send(
     if req.ciphertext.is_empty() || req.ciphertext.len() > MAX_CIPHERTEXT_LEN {
         return Err(ApiError::BadRequest("ciphertext is empty or too large".into()));
     }
+    if req.history.as_ref().is_some_and(|h| h.is_empty() || h.len() > MAX_CIPHERTEXT_LEN) {
+        return Err(ApiError::BadRequest("history copy is empty or too large".into()));
+    }
     db::require_own_device(&state.db, req.device_id, auth.id).await?;
 
     // Edits and reactions must point at a normal message in this channel;
     // only its author may edit it.
     match (req.kind, req.target_id) {
-        (MessageKind::Message, None) => {}
-        (MessageKind::Message, Some(_)) => return Err(ApiError::BadRequest("messages have no target".into())),
+        (MessageKind::Message | MessageKind::HistoryKeys, None) => {}
+        (MessageKind::Message | MessageKind::HistoryKeys, Some(_)) => {
+            return Err(ApiError::BadRequest("messages have no target".into()));
+        }
         (_, None) => return Err(ApiError::BadRequest("edits and reactions need a target".into())),
         (kind, Some(target)) => {
             let row: Option<(Uuid, String)> =
@@ -95,8 +100,8 @@ pub async fn send(
     }
 
     let row: MessageRow = sqlx::query_as(
-        "INSERT INTO messages (id, channel_id, author_id, sender_device_id, epoch, ciphertext, kind, target_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        "INSERT INTO messages (id, channel_id, author_id, sender_device_id, epoch, ciphertext, kind, target_id, history)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
     )
     .bind(MessageId::new().0)
     .bind(channel_id.0)
@@ -106,6 +111,7 @@ pub async fn send(
     .bind(&req.ciphertext)
     .bind(req.kind.as_str())
     .bind(req.target_id.map(|t| t.0))
+    .bind(req.history.as_deref())
     .fetch_one(&state.db)
     .await?;
 

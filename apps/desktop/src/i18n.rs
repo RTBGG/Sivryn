@@ -741,6 +741,13 @@ const TEXTS: &[(&str, &str, &str)] = &[
     ("call.switch_action", "Wechseln", "Switch"),
     ("menu.move_to", "Verschieben nach", "Move to"),
     ("media.volume", "Lautstärke", "Volume"),
+    ("guild.share_history", "Neue Mitglieder sehen den bisherigen Verlauf", "New members see earlier messages"),
+    (
+        "guild.share_history_hint",
+        "Nachrichten bleiben Ende-zu-Ende-verschlüsselt; wer jemanden aufnimmt, gibt ihm die Verlaufsschlüssel. Gilt für Nachrichten ab jetzt.",
+        "Messages stay end-to-end encrypted; whoever adds someone hands them the history keys. Applies to messages from now on.",
+    ),
+    ("call.afk_muted", "Im AFK-Kanal bleibt dein Mikrofon stumm.", "Your microphone stays muted in the AFK channel."),
     ("media.fullscreen", "Vollbild", "Fullscreen"),
     ("media.exit_fullscreen", "Vollbild beenden", "Exit fullscreen"),
     ("crop.title", "Bild zuschneiden", "Crop image"),

@@ -544,6 +544,13 @@ pub async fn update(
             .execute(&mut *tx)
             .await?;
     }
+    if let Some(share) = req.share_history {
+        sqlx::query("UPDATE guilds SET share_history = $2 WHERE id = $1")
+            .bind(guild_id.0)
+            .bind(share)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
 
     let guild = db::guild(&state.db, guild_id).await?;

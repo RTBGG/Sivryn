@@ -185,11 +185,41 @@ pub fn message_items(
     items
 }
 
+/// The roles someone can be given or have taken: those below my own highest
+/// role, with `MANAGE_ROLES`.
+fn role_submenu(state: AppState, guild: GuildId, user: UserId) -> Option<MenuItem> {
+    if !state.permissions(guild).allows(Permissions::MANAGE_ROLES) {
+        return None;
+    }
+    let has = state.member_roles(guild, user);
+    let roles: Vec<MenuItem> = state
+        .roles(guild)
+        .into_iter()
+        .filter(|r| !r.is_everyone && state.outranks(guild, r.position))
+        .map(|r| MenuItem::Check {
+            label: r.name.clone(),
+            checked: has.contains(&r.id),
+            action: MenuAction::SetRole(guild, user, r.id, !has.contains(&r.id)),
+        })
+        .collect();
+    (!roles.is_empty()).then(|| MenuItem::Submenu {
+        label: t("roles.title").into(),
+        icon: Some(Icon::Shield),
+        items: roles,
+    })
+}
+
 /// Menu for a user. `guild` adds moderation; `voice` adds call controls.
 pub fn user_items(state: AppState, user: UserId, guild: Option<GuildId>, voice: Option<ChannelId>) -> Vec<MenuItem> {
     let Some(me) = state.me() else { return Vec::new() };
     if user == me {
-        return vec![MenuItem::action(t("menu.profile"), Icon::User, MenuAction::Profile(user))];
+        // Your own roles can be given and taken like anyone's.
+        let mut items = vec![MenuItem::action(t("menu.profile"), Icon::User, MenuAction::Profile(user))];
+        if let Some(roles) = guild.and_then(|g| role_submenu(state, g, user)) {
+            items.push(MenuItem::Separator);
+            items.push(roles);
+        }
+        return items;
     }
     let name = state.username(user);
     let friends = state.friends.read();
@@ -225,27 +255,9 @@ pub fn user_items(state: AppState, user: UserId, guild: Option<GuildId>, voice: 
         let perms = state.permissions(guild);
         let owner = state.guild(guild).map(|g| g.owner_id);
         let target_is_owner = owner == Some(user);
-        // Roles below my own highest role can be given and taken.
-        if perms.allows(Permissions::MANAGE_ROLES) {
-            let has = state.member_roles(guild, user);
-            let roles: Vec<MenuItem> = state
-                .roles(guild)
-                .into_iter()
-                .filter(|r| !r.is_everyone && state.outranks(guild, r.position))
-                .map(|r| MenuItem::Check {
-                    label: r.name.clone(),
-                    checked: has.contains(&r.id),
-                    action: MenuAction::SetRole(guild, user, r.id, !has.contains(&r.id)),
-                })
-                .collect();
-            if !roles.is_empty() {
-                items.push(MenuItem::Separator);
-                items.push(MenuItem::Submenu {
-                    label: t("roles.title").into(),
-                    icon: Some(Icon::Shield),
-                    items: roles,
-                });
-            }
+        if let Some(roles) = role_submenu(state, guild, user) {
+            items.push(MenuItem::Separator);
+            items.push(roles);
         }
         let mut moderation = Vec::new();
         if let Some(channel) = voice.filter(|_| perms.allows(Permissions::MOVE_MEMBERS)) {

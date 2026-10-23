@@ -21,6 +21,8 @@ your GPU can encode it, and limits that you as the admin control.
   voices back. Cameras are published with simulcast.
 - **End-to-end encryption.** Text channels use MLS (RFC 9420). Voice and video can be
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
+  Servers can let new members read earlier messages through history keys that only travel
+  inside MLS.
 - **Familiar model:** servers (guilds) with categories, text and voice channels (voice channels
   have their own chat), roles with colors and a hierarchy, permissions per server and per
   channel or category (private channels), invites, bans, an AFK channel and a server-wide audio

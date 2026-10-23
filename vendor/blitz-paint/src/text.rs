@@ -12,6 +12,22 @@ pub(crate) fn stroke_text<'a>(
     doc: &BaseDocument,
     pos: Point,
 ) {
+    stroke_text_cut(scale, scene, lines, doc, pos, None);
+}
+
+/// Sivryn patch: [`stroke_text`], cut off with an ellipsis where text would
+/// pass `cut_at` (layout units). Drawn as three dots in the text's colour,
+/// since a "…" glyph would need shaping here.
+pub(crate) fn stroke_text_cut<'a>(
+    scale: f64,
+    scene: &mut impl PaintScene,
+    lines: impl Iterator<Item = Line<'a, TextBrush>>,
+    doc: &BaseDocument,
+    pos: Point,
+    cut_at: Option<f32>,
+) {
+    // Where the last glyph that fit ends, with the run's size and colour.
+    let mut cut: Option<(f32, f32, f32, color::AlphaColor<color::Srgb>)> = None;
     // Sivryn patch: snap baselines to whole device pixels. Glyph hinting
     // aligns outlines vertically to the pixel grid, which only sharpens text
     // when the baseline itself sits on a pixel boundary.
@@ -52,6 +68,9 @@ pub(crate) fn stroke_text<'a>(
                 let has_strikethrough =
                     text_decoration_line.contains(TextDecorationLine::LINE_THROUGH);
 
+                // Room for the dots after the last glyph that fits.
+                let limit = cut_at.map(|c| c - font_size * 0.9);
+                let mut end = None;
                 scene.draw_glyphs(
                     font,
                     font_size,
@@ -62,18 +81,28 @@ pub(crate) fn stroke_text<'a>(
                     1.0, // alpha
                     transform,
                     glyph_xform,
-                    glyph_run.glyphs().map(|glyph| {
+                    glyph_run.glyphs().filter_map(|glyph| {
                         let gx = x + glyph.x;
                         let gy = y - glyph.y;
                         x += glyph.advance;
+                        if limit.is_some_and(|l| x > l) {
+                            return None;
+                        }
+                        end = Some(x);
 
-                        anyrender::Glyph {
+                        Some(anyrender::Glyph {
                             id: glyph.id as _,
                             x: gx,
                             y: gy,
-                        }
+                        })
                     }),
                 );
+                if let Some(limit) = limit
+                    && x > limit
+                    && cut.is_none()
+                {
+                    cut = Some((end.unwrap_or(glyph_run.offset()), y, font_size, text_color));
+                }
 
                 let mut draw_decoration_line =
                     |offset: f32, size: f32, brush: &anyrender::Paint| {
@@ -98,6 +127,14 @@ pub(crate) fn stroke_text<'a>(
                     draw_decoration_line(offset, size, &text_decoration_brush);
                 }
             }
+        }
+    }
+    if let Some((x, y, size, color)) = cut {
+        let r = (size * 0.075).max(0.75) as f64;
+        for i in 0..3 {
+            let cx = (x + size * (0.18 + 0.27 * i as f32)) as f64;
+            let dot = kurbo::Circle::new((cx, y as f64 - r), r);
+            scene.fill(Fill::NonZero, transform, color, None, &dot);
         }
     }
 }

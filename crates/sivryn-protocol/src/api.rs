@@ -181,6 +181,9 @@ pub struct SendMessageRequest {
     pub device_id: DeviceId,
     pub epoch: u64,
     pub ciphertext: String,
+    /// See [`crate::model::Message::history`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
     #[serde(default)]
     pub kind: MessageKind,
     /// Required for edits and reactions.
@@ -422,6 +425,8 @@ pub struct UpdateGuildRequest {
     /// One of [`crate::model::AUDIO_BITRATES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_bitrate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_history: Option<bool>,
 }
 
 mod double_option {

@@ -315,6 +315,42 @@ async fn messages_validate_and_paginate() {
 }
 
 #[tokio::test]
+async fn history_copies_are_kept_and_sharing_can_be_turned_off() {
+    let Some(app) = TestApp::spawn(RegistrationMode::Open).await else { return };
+    let alice = app.register("alice").await;
+    let guild = create_guild(&app, &alice, "g").await;
+    assert!(guild.guild.share_history, "on by default");
+    let text = text_channel(&guild);
+    let a_dev = register_device(&app, &alice, vec![]).await;
+    let path = format!("/channels/{text}/messages");
+
+    // A message with its history copy, and a key handover (no target).
+    let m: Message = app
+        .post_ok(
+            &path,
+            &alice.token,
+            json!({ "device_id": a_dev, "epoch": 1, "ciphertext": "ct", "history": "sealed" }),
+        )
+        .await;
+    assert_eq!(m.history.as_deref(), Some("sealed"));
+    let keys = json!({ "device_id": a_dev, "epoch": 1, "ciphertext": "keys", "kind": "history_keys" });
+    let k: Message = app.post_ok(&path, &alice.token, keys).await;
+    assert_eq!(k.kind, sivryn_protocol::model::MessageKind::HistoryKeys);
+    let with_target =
+        json!({ "device_id": a_dev, "epoch": 1, "ciphertext": "keys", "kind": "history_keys", "target_id": m.id });
+    assert_eq!(app.post(&path, &alice.token, with_target).await.0, StatusCode::BAD_REQUEST);
+    let page: Value = app.get_ok(&format!("{path}?limit=5"), &alice.token).await;
+    assert_eq!(page["messages"][1]["history"], "sealed");
+
+    let (status, updated) =
+        app.patch(&format!("/guilds/{}", guild.guild.id), &alice.token, json!({ "share_history": false })).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["share_history"], false);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn voice_presence_needs_membership_and_survives_livekit_outage() {
     let Some(app) = TestApp::spawn(RegistrationMode::Open).await else { return };
     let alice = app.register("alice").await;

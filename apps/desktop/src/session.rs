@@ -6,9 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use sivryn_client_core::ApiClient;
-use sivryn_client_core::protocol::DeviceId;
 use sivryn_client_core::protocol::api::{RegisterDeviceRequest, RegisterRequest};
 use sivryn_client_core::protocol::model::User;
+use sivryn_client_core::protocol::{ChannelId, DeviceId};
 use sivryn_crypto::MlsDevice;
 
 use crate::store::{self, AccountId, Store};
@@ -26,6 +26,11 @@ pub struct Session {
     pub device_id: DeviceId,
     pub mls: Rc<RefCell<MlsDevice>>,
     pub store: Rc<Store>,
+    /// Channels of guilds that share their history with new members.
+    pub history_channels: Rc<RefCell<std::collections::HashSet<ChannelId>>>,
+    /// Channels that got new history keys and should look for older
+    /// messages they unlock.
+    pub history_unlocked: Rc<RefCell<std::collections::HashSet<ChannelId>>>,
 }
 
 impl PartialEq for Session {
@@ -93,6 +98,8 @@ impl Session {
                         device_id,
                         mls: Rc::new(RefCell::new(mls)),
                         store: store.clone(),
+                        history_channels: Default::default(),
+                        history_unlocked: Default::default(),
                     };
                     match session.top_up_key_packages().await {
                         Ok(()) => return Ok(session),
@@ -119,7 +126,15 @@ impl Session {
             .await
             .map_err(|e| e.to_string())?;
         store.save_device(device.device_id, &mls.export()).map_err(|e| e.to_string())?;
-        Ok(Self { api, user, device_id: device.device_id, mls: Rc::new(RefCell::new(mls)), store })
+        Ok(Self {
+            api,
+            user,
+            device_id: device.device_id,
+            mls: Rc::new(RefCell::new(mls)),
+            store,
+            history_channels: Default::default(),
+            history_unlocked: Default::default(),
+        })
     }
 
     /// Uploads fresh key packages when the server is running low. Their

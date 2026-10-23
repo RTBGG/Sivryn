@@ -58,6 +58,7 @@ pub struct GuildRow {
     pub afk_channel_id: Option<Uuid>,
     pub afk_timeout_minutes: i32,
     pub audio_bitrate: i32,
+    pub share_history: bool,
 }
 
 impl From<GuildRow> for Guild {
@@ -71,6 +72,7 @@ impl From<GuildRow> for Guild {
             afk_channel_id: r.afk_channel_id.map(ChannelId),
             afk_timeout_minutes: r.afk_timeout_minutes.max(1) as u32,
             audio_bitrate: r.audio_bitrate.max(8000) as u32,
+            share_history: r.share_history,
         }
     }
 }
@@ -143,6 +145,7 @@ pub struct MessageRow {
     pub created_at: DateTime<Utc>,
     pub kind: String,
     pub target_id: Option<Uuid>,
+    pub history: Option<String>,
 }
 
 impl From<MessageRow> for Message {
@@ -156,6 +159,7 @@ impl From<MessageRow> for Message {
             target_id: r.target_id.map(MessageId),
             epoch: r.epoch as u64,
             ciphertext: r.ciphertext,
+            history: r.history,
             created_at: r.created_at,
         }
     }

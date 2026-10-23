@@ -108,8 +108,26 @@ If two devices create the same channel group at the same moment, the server acce
 first commit; the other device drops its provisional group (epoch 0, only itself) and joins from
 the winner's welcome, even when the welcome arrives before its own commit is rejected.
 
-**Known limits:** messages sent before a device joined cannot be decrypted (forward secrecy by
-design).
+**History for new members:** MLS deletes message keys after use, so a device added later can't
+read what was sent before. Guilds that share history (`share_history`, on by default) therefore
+also seal every message, edit and reaction with the channel's *history key* (XChaCha20-Poly1305,
+bound to channel, author, kind and target) and store that copy next to the MLS ciphertext
+(`messages.history`). The keys only travel inside MLS, in messages of their own kind
+(`history_keys`, never shown):
+
+- the first message in a channel starts a key and hands it to the group;
+- whoever adds devices to a channel's group hands them all of the channel's keys;
+- removing someone starts a new key, so they can't read what comes after.
+
+A client that receives new keys opens the copies MLS couldn't decrypt and goes back up to 2000
+messages on the server for the ones they unlock. A key is kept only after it was handed out.
+The price is weaker forward secrecy for history: whoever gets hold of a history key can read
+everything sealed with it. DMs and groups don't use history keys.
+
+**Known limits:** without history sharing (DMs, groups, guilds that turned it off, and messages
+from before the feature), messages sent before a device joined cannot be decrypted (forward
+secrecy by design). A device of the same user added later only sees history through the same
+history keys.
 
 ## Audio pipeline
 

@@ -310,7 +310,7 @@ fn UserPanel() -> Element {
     drop(session);
     let name = state.username(id);
     let my_status = *state.my_status.read();
-    let muted = *state.muted.read();
+    let muted = *state.muted.read() || state.in_afk_channel();
     let deafened = *state.deafened.read();
     let in_call = state.call.read().is_some();
     let connection = *state.connection.read();

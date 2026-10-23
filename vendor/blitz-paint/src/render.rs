@@ -448,13 +448,25 @@ impl ElementCx<'_> {
                 }
             }
 
+            // Sivryn patch: one line of text that doesn't fit a clipping box
+            // (`white-space: nowrap` with `overflow: hidden`) ends with an
+            // ellipsis. Stylo has `text-overflow` disabled, so this is the cue.
+            let styles = self.node.primary_styles();
+            let clips_one_line = styles.as_ref().is_some_and(|s| {
+                s.get_inherited_text().text_wrap_mode == style::computed_values::text_wrap_mode::T::Nowrap
+                    && !matches!(s.get_box().overflow_x, style::values::computed::Overflow::Visible)
+            });
+            let width = self.frame.content_box.width() as f32;
+            let cut_at = (clips_one_line && text_layout.layout.width() > width + 0.5).then_some(width);
+
             // Render text
-            crate::text::stroke_text(
+            crate::text::stroke_text_cut(
                 self.scale,
                 scene,
                 text_layout.layout.lines(),
                 self.context.dom,
                 pos,
+                cut_at,
             );
         }
     }

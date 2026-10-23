@@ -19,9 +19,8 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sivryn_client_core::protocol::model::{HistoryKey, MessageContent, MessageKind};
 use sivryn_client_core::protocol::{ChannelId, DeviceId, MessageId, UserId};
-
-use sivryn_client_core::protocol::model::{MessageContent, MessageKind};
 
 use crate::messages::Record;
 
@@ -237,14 +236,16 @@ impl Store {
         Ok(())
     }
 
-    /// Stores records; ones already stored keep their original content.
+    /// Stores records. Ones already stored keep their content; only a
+    /// message stored unreadable gets the content found later (history keys).
     pub fn insert(&self, channel: ChannelId, records: &[Record]) -> Result<(), StoreError> {
         let tx = self.db.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO messages (id, channel_id, author_id, created_at, body, kind, target_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (id) DO NOTHING",
+                 ON CONFLICT (id) DO UPDATE SET body = excluded.body
+                 WHERE messages.body IS NULL AND excluded.body IS NOT NULL",
             )?;
             for r in records {
                 let body = r.content.as_ref().map(|c| {
@@ -331,6 +332,42 @@ impl Store {
         row.map(|r| self.row_to_record(r)).transpose()
     }
 
+    /// A channel's history keys (see `history.rs`).
+    pub fn history_keys(&self, channel: ChannelId) -> Result<Vec<HistoryKey>, StoreError> {
+        match self.get(&format!("history:{channel}"))? {
+            Some(json) => serde_json::from_slice(&json).map_err(|_| StoreError::Corrupt),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Adds history keys; returns whether any was new.
+    pub fn add_history_keys(&self, channel: ChannelId, keys: &[HistoryKey]) -> Result<bool, StoreError> {
+        let mut all = self.history_keys(channel)?;
+        let before = all.len();
+        for key in keys {
+            if !all.iter().any(|k| k.id == key.id) {
+                all.push(key.clone());
+            }
+        }
+        if all.len() == before {
+            return Ok(false);
+        }
+        self.put(&format!("history:{channel}"), &serde_json::to_vec(&all).expect("keys serialize"))?;
+        Ok(true)
+    }
+
+    /// Which of these messages are stored readable.
+    pub fn readable(&self, ids: &[MessageId]) -> Result<std::collections::HashSet<MessageId>, StoreError> {
+        let mut stmt = self.db.prepare_cached("SELECT 1 FROM messages WHERE id = ?1 AND body IS NOT NULL")?;
+        let mut out = std::collections::HashSet::new();
+        for id in ids {
+            if stmt.exists([id.to_string()])? {
+                out.insert(*id);
+            }
+        }
+        Ok(out)
+    }
+
     /// ID of the newest stored message in a channel (to catch up from).
     pub fn last_message_id(&self, channel: ChannelId) -> Result<Option<MessageId>, StoreError> {
         let id: Option<String> =
@@ -359,6 +396,28 @@ mod tests {
             target: None,
             content: body.map(|b| MessageContent { body: b.into(), ..Default::default() }),
         }
+    }
+
+    #[test]
+    fn history_keys_collect_and_unlock_stored_messages() {
+        let s = store();
+        let channel = ChannelId::new();
+        let (k1, k2) = (crate::history::new_key(), crate::history::new_key());
+        assert!(s.history_keys(channel).unwrap().is_empty());
+        assert!(s.add_history_keys(channel, std::slice::from_ref(&k1)).unwrap());
+        assert!(!s.add_history_keys(channel, std::slice::from_ref(&k1)).unwrap(), "known key");
+        assert!(s.add_history_keys(channel, &[k1.clone(), k2.clone()]).unwrap());
+        assert_eq!(s.history_keys(channel).unwrap(), vec![k1, k2]);
+        assert!(s.history_keys(ChannelId::new()).unwrap().is_empty());
+
+        // A message stored unreadable gets its content once a key opens it.
+        let locked = record(None);
+        s.insert(channel, std::slice::from_ref(&locked)).unwrap();
+        assert!(s.readable(&[locked.id]).unwrap().is_empty());
+        let opened = Record { content: Some(MessageContent { body: "later".into(), ..Default::default() }), ..locked };
+        s.insert(channel, std::slice::from_ref(&opened)).unwrap();
+        assert!(s.readable(&[opened.id]).unwrap().contains(&opened.id));
+        assert_eq!(s.record(opened.id).unwrap().unwrap().content.unwrap().body, "later");
     }
 
     #[test]

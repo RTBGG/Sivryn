@@ -10,6 +10,10 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/render.rs` (`draw_canvas`): canvases larger than 8192 px (the usual GPU texture limit,
   e.g. a zoomed image) render into a smaller texture that is stretched to the canvas; the
   full-size texture failed validation and crashed the app.
+- `src/text.rs` (`stroke_text_cut`), `src/render.rs` (`draw_inline_layout`): one line of text in
+  a box with `white-space: nowrap` and `overflow: hidden` that doesn't fit is cut off with an
+  ellipsis (three dots in the text colour). Stylo has `text-overflow` disabled, so that pair is
+  the cue.
 - `src/render.rs` (`render_element`): draws the scroll bar thumb of scroll containers (see
   `scrollbar.rs` in blitz-dom).
 - `src/render.rs`: the text input caret uses the element's text colour instead of
@@ -24,6 +28,7 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 
 ## blitz-dom 0.2.4
 
+- `src/layout/inline.rs`: `white-space: nowrap` keeps text on one line; upstream wrapped it.
 - `src/layout/construct.rs`: text inputs honour `font-family` and `font-weight`; before,
   they always used the default font.
 - `src/node/element.rs` (`TextInputData::set_text`): a value set by the app moves the caret to

@@ -462,6 +462,17 @@ impl AppState {
         self.guilds.read().iter().find(|g| g.guild.id == id).map(|g| g.guild.clone())
     }
 
+    /// Whether this is its server's AFK channel.
+    pub fn is_afk_channel(&self, channel: ChannelId) -> bool {
+        self.guild_of(channel).and_then(|g| self.guild(g)).is_some_and(|g| g.afk_channel_id == Some(channel))
+    }
+
+    /// In the AFK channel the microphone stays off, whatever the mute button says.
+    pub fn in_afk_channel(&self) -> bool {
+        let channel = self.call.read().as_ref().map(|c| c.channel);
+        channel.is_some_and(|c| self.is_afk_channel(c))
+    }
+
     /// My permissions in a guild (none outside guilds).
     pub fn permissions(&self, guild: GuildId) -> Permissions {
         self.guilds.read().iter().find(|g| g.guild.id == guild).map(|g| g.permissions).unwrap_or(Permissions::empty())
@@ -633,6 +644,11 @@ impl AppState {
             if remembered.is_none() && guilds.is_empty() {
                 self.home.set(true);
             }
+        }
+        // Channels whose messages also get a copy for later members.
+        if let Some(s) = self.session.peek().as_ref() {
+            *s.history_channels.borrow_mut() =
+                guilds.iter().filter(|g| g.guild.share_history).flat_map(|g| g.channels.iter().map(|c| c.id)).collect();
         }
         self.guilds.set(guilds);
         Ok(())
@@ -856,6 +872,13 @@ impl AppState {
                     return;
                 }
                 let records = chat::receive(s, channel, std::slice::from_ref(&message));
+                // New history keys: the older messages they unlock.
+                if message.kind == MessageKind::HistoryKeys && s.history_unlocked.borrow().contains(&channel) {
+                    match chat::backfill(s, channel).await {
+                        Ok(unlocked) => self.on_new_records(s, channel, unlocked),
+                        Err(e) => tracing::warn!(error = %e, "could not load earlier messages"),
+                    }
+                }
                 let from_other = message.author_id != s.user.id && message.kind == MessageKind::Message;
                 let viewing = *self.channel.peek() == Some(channel);
                 for record in &records {
@@ -1102,6 +1125,10 @@ impl AppState {
     }
 
     pub fn set_muted(mut self, muted: bool) {
+        if !muted && self.in_afk_channel() {
+            self.toast(t("call.afk_muted"), false);
+            return;
+        }
         // Unmuting while deafened undeafens too, like everywhere else.
         if !muted && *self.deafened.peek() {
             self.set_deafened(false);
@@ -1131,7 +1158,7 @@ impl AppState {
 
     /// Deafening also mutes; others see the microphone as muted.
     fn apply_mute(&self) {
-        let silenced = *self.muted.peek() || *self.deafened.peek();
+        let silenced = *self.muted.peek() || *self.deafened.peek() || self.in_afk_channel();
         use_services_engine().set_muted(silenced);
         if let Some(call) = self.call.peek().as_ref()
             && let Some(vc) = call.call.borrow().as_ref()

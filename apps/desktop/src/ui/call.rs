@@ -197,7 +197,8 @@ async fn connect_inner(
     if let Err(e) = call.enable_microphone().await {
         state.report(Err(format!("{}: {e}", t("call.mic_unavailable"))));
     }
-    let silenced = *state.muted.peek() || *state.deafened.peek();
+    // The AFK channel keeps the microphone off.
+    let silenced = *state.muted.peek() || *state.deafened.peek() || state.is_afk_channel(channel);
     call.set_muted(silenced);
     let deafened = *state.deafened.peek();
     if deafened {
@@ -457,7 +458,7 @@ pub fn CallView(#[props(default)] compact: bool) -> Element {
         tiles.insert(0, big);
     }
     drop(call);
-    let muted = *state.muted.read() || *state.deafened.read();
+    let muted = *state.muted.read() || *state.deafened.read() || state.in_afk_channel();
     let deafened = *state.deafened.read();
     let count = participants.len();
 

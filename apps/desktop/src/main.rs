@@ -7,6 +7,7 @@
 mod chat;
 mod emoji;
 mod files;
+mod history;
 mod hotkeys;
 mod i18n;
 mod mentions;

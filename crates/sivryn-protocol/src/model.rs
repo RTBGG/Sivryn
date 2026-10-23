@@ -106,6 +106,11 @@ pub struct Guild {
     /// Opus bitrate for microphones in all of this guild's voice channels.
     #[serde(default = "default_audio_bitrate")]
     pub audio_bitrate: u32,
+    /// Members who join later can read the channels' earlier messages
+    /// (clients hand them the history keys). On for new guilds; servers that
+    /// predate it don't send it, which reads as off.
+    #[serde(default)]
+    pub share_history: bool,
 }
 
 fn default_afk_minutes() -> u32 {
@@ -255,6 +260,11 @@ pub struct Message {
     pub epoch: u64,
     /// Base64 (URL-safe, unpadded) MLS ciphertext.
     pub ciphertext: String,
+    /// The same content sealed with the channel's history key, for members
+    /// who join later (key id, nonce and ciphertext, base64). Absent where
+    /// the guild doesn't share history, and in DMs and groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -267,6 +277,9 @@ pub enum MessageKind {
     Edit,
     /// Adds or removes a reaction on `target_id`.
     Reaction,
+    /// Hands the channel's history keys to the group (not shown; see
+    /// [`MessageContent::history_keys`]).
+    HistoryKeys,
 }
 
 impl MessageKind {
@@ -275,6 +288,7 @@ impl MessageKind {
             Self::Message => "message",
             Self::Edit => "edit",
             Self::Reaction => "reaction",
+            Self::HistoryKeys => "history_keys",
         }
     }
 
@@ -282,9 +296,23 @@ impl MessageKind {
         match s {
             "edit" => Self::Edit,
             "reaction" => Self::Reaction,
+            "history_keys" => Self::HistoryKeys,
             _ => Self::Message,
         }
     }
+}
+
+/// A channel's history key: messages are also sealed with it (see
+/// [`Message::history`]), so members who join later can read what was
+/// written before. It only travels inside MLS messages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryKey {
+    /// Base64 (URL-safe, unpadded), 16 bytes; put in front of each sealed copy.
+    pub id: String,
+    /// Base64 (URL-safe, unpadded), 32 bytes (XChaCha20-Poly1305).
+    pub key: String,
+    /// Unix milliseconds; the newest key seals new messages.
+    pub created_at: i64,
 }
 
 /// The plaintext payload clients put inside an MLS application message.
@@ -302,6 +330,9 @@ pub struct MessageContent {
     /// Set on `MessageKind::Reaction` messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction: Option<Reaction>,
+    /// Set on `MessageKind::HistoryKeys` messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_keys: Vec<HistoryKey>,
 }
 
 /// An encrypted file. The server stores only the ciphertext at `file_id`;

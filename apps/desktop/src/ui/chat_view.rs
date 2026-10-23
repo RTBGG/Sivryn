@@ -647,7 +647,7 @@ fn send(mut state: AppState, channel: ChannelId) {
         if previews && let Some(url) = preview::first_link(&body) {
             embeds.extend(preview::build(&s, channel, url).await);
         }
-        let content = MessageContent { body, reply_to: c.reply_to, attachments, embeds, reaction: None };
+        let content = MessageContent { body, reply_to: c.reply_to, attachments, embeds, ..Default::default() };
         let result = chat::send(&s, channel, content, MessageKind::Message, None).await;
         finish(result.is_ok());
         match result {

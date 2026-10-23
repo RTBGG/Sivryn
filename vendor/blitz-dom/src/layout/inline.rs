@@ -111,6 +111,13 @@ impl BaseDocument {
                             - pbw
                     });
 
+                // Sivryn patch: `white-space: nowrap` keeps text on one line
+                // (upstream ignored it and wrapped anyway).
+                let nowrap = self.nodes[node_id].primary_styles().is_some_and(|s| {
+                    s.get_inherited_text().text_wrap_mode
+                        == style::computed_values::text_wrap_mode::T::Nowrap
+                });
+
                 if inputs.run_mode == taffy::RunMode::ComputeSize {
                     // Height SHOULD be ignored if RequestedAxis is Horizontal, but currently that doesn't
                     // always seem to be the case. So we perform layout to obtain a height every time. We
@@ -122,7 +129,7 @@ impl BaseDocument {
                     //
                     // FIXME: avoid the need to clone the layout each time
                     let mut layout = inline_layout.clone();
-                    layout.layout.break_all_lines(Some(width));
+                    layout.layout.break_all_lines(if nowrap { None } else { Some(width) });
 
                     return taffy::Size {
                         width: width.ceil() / scale,
@@ -131,7 +138,7 @@ impl BaseDocument {
                 }
 
                 // Perform inline layout
-                inline_layout.layout.break_all_lines(Some(width));
+                inline_layout.layout.break_all_lines(if nowrap { None } else { Some(width) });
 
                 let alignment = self.nodes[node_id]
                     .primary_styles()

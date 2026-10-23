@@ -9,7 +9,7 @@ use sivryn_client_core::protocol::permissions::Permissions;
 
 use super::AppState;
 use super::icons::{Icon, Svg};
-use super::widgets::{Avatar, IconButton, Select, opt};
+use super::widgets::{Avatar, IconButton, Select, Toggle, opt};
 use crate::i18n::t;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +189,18 @@ fn Overview(guild: GuildId) -> Element {
                 },
             }
             div { class: "hint", {t("guild.audio_bitrate_hint")} }
+        }
+        div { class: "field",
+            div { class: "toggle-row",
+                div {
+                    div { class: "toggle-label", {t("guild.share_history")} }
+                    div { class: "hint", {t("guild.share_history_hint")} }
+                }
+                Toggle {
+                    on: g.share_history,
+                    onchange: move |v| update(UpdateGuildRequest { share_history: Some(v), ..Default::default() }),
+                }
+            }
         }
         if Some(g.owner_id) == state.me() {
             div { class: "divider" }
