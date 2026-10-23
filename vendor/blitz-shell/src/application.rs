@@ -65,6 +65,13 @@ impl<Rend: WindowRenderer> ApplicationHandler<BlitzShellEvent> for BlitzApplicat
     ) {
         // Exit the app when window close is requested.
         if matches!(event, WindowEvent::CloseRequested) {
+            // Sivryn patch: the app may keep running in the notification area.
+            if crate::window_control::hide_on_close() {
+                if let Some(window) = self.windows.get(&window_id) {
+                    window.window.set_visible(false);
+                }
+                return;
+            }
             // Drop window before exiting event loop
             // See https://github.com/rust-windowing/winit/issues/4135
             let window = self.windows.remove(&window_id);

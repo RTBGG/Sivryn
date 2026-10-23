@@ -876,7 +876,10 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                 if drag {
                     span { class: "drop-hint", Svg { icon: Icon::Upload, size: 16 } {t("chat.drop_here")} }
                 } else {
-                    input {
+                    // Grows with its text; Enter sends, Shift+Enter starts a new line.
+                    textarea {
+                        "data-autogrow": "true",
+                        rows: "1",
                         // Opening a chat puts the cursor here (the view is
                         // rebuilt per channel, so this applies to each one).
                         autofocus: "true",
@@ -902,6 +905,7 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                                 selected.set((current + found_for_keys.len() - 1) % found_for_keys.len());
                             }
                             Key::Enter | Key::Tab if !found_for_keys.is_empty() => {
+                                e.prevent_default();
                                 if let Some(sug) = found_for_keys.get(current) {
                                     pick_suggestion(state, channel, sug);
                                 }
@@ -911,7 +915,11 @@ fn ComposerView(channel: ChannelId, name: String, kind: ChannelKind) -> Element 
                                 let draft = state.composer.peek().get(&channel).map(|c| c.draft.clone());
                                 dismissed.set(draft);
                             }
-                            Key::Enter => send(state, channel),
+                            Key::Enter if !e.modifiers().shift() => {
+                                // Sent, not a new line in the box.
+                                e.prevent_default();
+                                send(state, channel);
+                            }
                             Key::Escape => cancel(),
                             Key::ArrowUp => {
                                 let empty = state.composer.peek().get(&channel).is_none_or(|c| c.draft.is_empty());

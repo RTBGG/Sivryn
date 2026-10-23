@@ -42,6 +42,12 @@ pub struct Settings {
     pub confirm_voice_switch: bool,
     /// Download updates by themselves (installed at the next start).
     pub auto_update: bool,
+    /// Start with Windows (installed copies).
+    pub autostart: bool,
+    /// When started with Windows, only the notification area icon shows.
+    pub start_minimized: bool,
+    /// The close button hides the window to the notification area.
+    pub close_to_tray: bool,
     /// Widths of the channel list and of a voice channel's chat, in pixels.
     pub sidebar_width: f64,
     pub voice_chat_width: f64,
@@ -67,6 +73,9 @@ impl Default for Settings {
             collapsed_categories: Default::default(),
             confirm_voice_switch: true,
             auto_update: true,
+            autostart: true,
+            start_minimized: true,
+            close_to_tray: true,
             sidebar_width: 252.0,
             voice_chat_width: 380.0,
             video: VideoSettings::default(),

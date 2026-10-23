@@ -17,7 +17,7 @@ use crate::settings::{Keybinds, Language, SCREEN_FPS, ScreenResolution, Theme};
 use sivryn_client_core::protocol::GuildId;
 use sivryn_client_core::protocol::api::UpdateMeRequest;
 
-const PAGES: [(SettingsPage, Icon, &str); 8] = [
+const PAGES: [(SettingsPage, Icon, &str); 9] = [
     (SettingsPage::Account, Icon::User, "settings.account"),
     (SettingsPage::Privacy, Icon::Lock, "settings.privacy"),
     (SettingsPage::Voice, Icon::Mic, "settings.voice"),
@@ -25,6 +25,7 @@ const PAGES: [(SettingsPage, Icon, &str); 8] = [
     (SettingsPage::Keybinds, Icon::Keyboard, "settings.keybinds"),
     (SettingsPage::Appearance, Icon::Palette, "settings.appearance"),
     (SettingsPage::Notifications, Icon::Bell, "settings.notifications"),
+    (SettingsPage::Windows, Icon::Monitor, "settings.windows"),
     (SettingsPage::About, Icon::Info, "settings.about"),
 ];
 
@@ -64,6 +65,7 @@ pub fn SettingsView() -> Element {
                             SettingsPage::Keybinds => rsx! { KeybindsPage {} },
                             SettingsPage::Appearance => rsx! { AppearancePage {} },
                             SettingsPage::Notifications => rsx! { NotificationsPage {} },
+                            SettingsPage::Windows => rsx! { WindowsPage {} },
                             SettingsPage::About => rsx! { AboutPage {} },
                         }
                     }
@@ -865,6 +867,35 @@ fn NotificationsPage() -> Element {
             hint: t("notify.desktop_hint").to_string(),
             on: settings.notifications.desktop,
             onchange: move |v| state.update_settings(|s| s.notifications.desktop = v),
+        }
+    }
+}
+
+/// Starting with Windows and the notification area.
+#[component]
+fn WindowsPage() -> Element {
+    let state = use_context::<AppState>();
+    let s = state.settings.read().clone();
+    let installed = use_hook(crate::updater::is_installed);
+    rsx! {
+        h1 { class: "section-title", {t("settings.windows")} }
+        ToggleRow {
+            label: t("windows.autostart").to_string(),
+            hint: Some(if installed { t("windows.autostart_hint") } else { t("windows.autostart_not_installed") }.to_string()),
+            on: s.autostart && installed,
+            onchange: move |v| state.update_settings(|s| s.autostart = v),
+        }
+        ToggleRow {
+            label: t("windows.start_minimized").to_string(),
+            hint: Some(t("windows.start_minimized_hint").to_string()),
+            on: s.start_minimized,
+            onchange: move |v| state.update_settings(|s| s.start_minimized = v),
+        }
+        ToggleRow {
+            label: t("windows.close_to_tray").to_string(),
+            hint: Some(t("windows.close_to_tray_hint").to_string()),
+            on: s.close_to_tray,
+            onchange: move |v| state.update_settings(|s| s.close_to_tray = v),
         }
     }
 }

@@ -440,6 +440,9 @@ pub struct TextInputData {
     pub editor: Box<parley::PlainEditor<TextBrush>>,
     /// Whether the input is a singleline or multiline input
     pub is_multiline: bool,
+    /// Sivryn patch: the width the text wraps at (textareas), so it is only
+    /// set when it changes: setting it reshapes all of the text.
+    pub wrap_width: Option<f32>,
 }
 
 // FIXME: Implement Clone for PlainEditor
@@ -455,6 +458,17 @@ impl TextInputData {
         Self {
             editor,
             is_multiline,
+            wrap_width: None,
+        }
+    }
+
+    /// Sivryn patch: wraps the text at `width` (device pixels). Parley lays
+    /// the whole text out again on every width it is given, even the same
+    /// one, which made long text in a textarea lag on every layout pass.
+    pub fn set_wrap_width(&mut self, width: f32) {
+        if self.wrap_width.is_none_or(|w| (w - width).abs() > 0.25) {
+            self.wrap_width = Some(width);
+            self.editor.set_width(Some(width));
         }
     }
 

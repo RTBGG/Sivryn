@@ -21,19 +21,15 @@ pub fn Shell() -> Element {
 
     rsx! {
         div { class: "app",
+            // Sliders, hover and the zoom overview listen on the window's root
+            // (overlays such as fullscreen lie outside this element).
             onmousemove: move |e| {
-                use dioxus_native::prelude::dioxus_elements::input_data::MouseButton;
-                super::widgets::slider_pointer_move(e.client_coordinates().x, e.held_buttons().contains(MouseButton::Primary));
-                super::widgets::hover_root_move();
                 super::resize::on_move(state, &e);
                 super::dnd::on_move(state, &e);
-                super::call::minimap_pointer_move(&e);
             },
             onmouseup: move |_| {
-                super::widgets::slider_pointer_up();
                 super::resize::finish(state);
                 super::dnd::finish(state);
-                super::call::minimap_pointer_up();
             },
             GuildRail {}
             div { class: "sidebar-wrap", style: "width: {super::resize::width(&state, super::resize::Pane::Sidebar)}px;",

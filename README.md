@@ -23,6 +23,8 @@ your GPU can encode it, and limits that you as the admin control.
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
   Servers can let new members read earlier messages through history keys that only travel
   inside MLS.
+- **At home on Windows.** Notification area icon with status and speaking indicator, call
+  buttons in the taskbar preview, starting with Windows and closing to the notification area.
 - **Familiar model:** servers (guilds) with categories, text and voice channels (voice channels
   have their own chat), roles with colors and a hierarchy, permissions per server and per
   channel or category (private channels), invites, bans, an AFK channel and a server-wide audio

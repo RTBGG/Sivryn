@@ -741,6 +741,32 @@ const TEXTS: &[(&str, &str, &str)] = &[
     ("call.switch_action", "Wechseln", "Switch"),
     ("menu.move_to", "Verschieben nach", "Move to"),
     ("media.volume", "Lautstärke", "Volume"),
+    ("settings.windows", "Windows", "Windows"),
+    ("windows.autostart", "Mit Windows starten", "Start with Windows"),
+    (
+        "windows.autostart_hint",
+        "Sivryn startet, wenn du dich bei Windows anmeldest.",
+        "Sivryn starts when you sign in to Windows.",
+    ),
+    (
+        "windows.autostart_not_installed",
+        "Nur in der installierten Version verfügbar.",
+        "Only available in the installed version.",
+    ),
+    ("windows.start_minimized", "Minimiert starten", "Start minimized"),
+    (
+        "windows.start_minimized_hint",
+        "Beim Start mit Windows nur das Symbol in der Infoleiste zeigen, ohne Fenster.",
+        "When starting with Windows, show only the notification area icon, no window.",
+    ),
+    ("windows.close_to_tray", "In die Infoleiste schließen", "Close to the notification area"),
+    (
+        "windows.close_to_tray_hint",
+        "Das X versteckt Sivryn in der Infoleiste. Beenden über das Symbol dort.",
+        "The X hides Sivryn in the notification area. Quit from the icon there.",
+    ),
+    ("tray.open", "Sivryn öffnen", "Open Sivryn"),
+    ("tray.quit", "Sivryn beenden", "Quit Sivryn"),
     ("guild.share_history", "Neue Mitglieder sehen den bisherigen Verlauf", "New members see earlier messages"),
     (
         "guild.share_history_hint",

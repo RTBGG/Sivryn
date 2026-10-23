@@ -29,6 +29,13 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 ## blitz-dom 0.2.4
 
 - `src/layout/inline.rs`: `white-space: nowrap` keeps text on one line; upstream wrapped it.
+- `src/layout/mod.rs` (textarea): the text wraps at the textarea's width (upstream kept it on one
+  endless line), and a textarea with `data-autogrow` is as tall as its text. A textarea taller
+  than its box scrolls (`overflow-y: auto`) and follows the caret while typing
+  (`input_editing::keep_caret_visible`, called from `events/keyboard.rs`). The wrap width is only
+  handed to the editor when it changes (`TextInputData::set_wrap_width`): parley lays out the
+  whole text again for every width it gets, which made long text lag. blitz-paint draws only the
+  lines in view (`draw_text_input_text`).
 - `src/layout/construct.rs`: text inputs honour `font-family` and `font-weight`; before,
   they always used the default font.
 - `src/node/element.rs` (`TextInputData::set_text`): a value set by the app moves the caret to
@@ -96,6 +103,13 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/fullscreen.rs`, `src/window.rs` (`View::init`): `blitz_shell::fullscreen::set_fullscreen`
   puts the app's windows into borderless fullscreen and back, `set_cursor_visible` hides the
   pointer; apps had no handle to their window.
+- `src/window.rs` (`View::poll`): polls the document until it has nothing left to do. Only a
+  poll that ends pending registers the waker for the next piece of work; after one that did
+  work, wake-ups were lost until some window event happened, so a hidden window stopped running
+  its tasks (it couldn't be shown again from the notification area, nor quit).
+- `src/window_control.rs`, `src/application.rs` (close requests): the app can show, hide and
+  focus its window, get its native handle, and keep running when the close button is pressed
+  (`set_close_handler`, used to close to the notification area).
 - `src/window.rs` (mouse input): scroll bars get the pointer first; while one is dragged the
   page sees neither the moves nor the press and release.
 - `src/canvas_frames.rs`, `src/window.rs` (`View::init`, `View::poll`):

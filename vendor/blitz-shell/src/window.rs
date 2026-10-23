@@ -106,6 +106,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         }
         crate::canvas_frames::register(proxy.clone(), winit_window.id());
         crate::fullscreen::register(winit_window.clone());
+        crate::window_control::register(winit_window.clone());
 
         Self {
             renderer: config.renderer,
@@ -209,9 +210,26 @@ impl<Rend: WindowRenderer> View<Rend> {
         if self.doc.apply_focus_request() {
             self.request_redraw();
         }
-        if let Some(waker) = &self.waker {
-            let cx = std::task::Context::from_waker(waker);
-            if self.doc.poll(Some(cx)) {
+        if let Some(waker) = self.waker.clone() {
+            // Sivryn patch: poll until the document has nothing left to do.
+            // Only a poll that ends pending leaves the waker behind for the
+            // next piece of work; after one that did work, wake-ups were lost
+            // until some window event polled again, so a hidden window (in the
+            // notification area) stopped running its tasks altogether.
+            let mut did_work = false;
+            for round in 0.. {
+                let cx = std::task::Context::from_waker(&waker);
+                if !self.doc.poll(Some(cx)) {
+                    break;
+                }
+                did_work = true;
+                if round == 32 {
+                    // Still busy: continue in a later turn of the event loop.
+                    waker.wake_by_ref();
+                    break;
+                }
+            }
+            if did_work {
                 #[cfg(feature = "accessibility")]
                 {
                     if self.doc.has_changes() {

@@ -274,6 +274,22 @@ pub(super) fn remember_volume(volume: f32) {
     LAST_VOLUME.with(|v| v.set(volume));
 }
 
+thread_local! {
+    /// The volume before the speaker button muted it, to go back to.
+    static BEFORE_MUTE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// The speaker button: mutes, or goes back to the volume from before (full
+/// volume when the slider itself was at zero).
+pub(super) fn toggle_mute(current: f32) -> f32 {
+    if current > 0.0 {
+        BEFORE_MUTE.with(|v| v.set(current));
+        0.0
+    } else {
+        BEFORE_MUTE.with(|v| v.get()).max(0.05)
+    }
+}
+
 /// Height of the controls over a chat video.
 const OVERLAY_HEIGHT: u32 = 52;
 
@@ -467,19 +483,63 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
         }
     };
     let start_frame = start.clone();
-    let controls = rsx! {
+    // Audio: name and buttons on top, a wide timeline below. Video: one row
+    // over the picture.
+    let controls = if is_audio {
+        rsx! {
+            div { class: "audio-controls",
+                div { class: "audio-row",
+                    div { class: "icon-button", onclick: start,
+                        if playing { Svg { icon: Icon::Pause, size: 18 } } else { Svg { icon: Icon::Play, size: 18 } }
+                    }
+                    span { class: "audio-name", "{attachment.name}" }
+                    DownloadButton { attachment: attachment.clone() }
+                }
+                div { class: "audio-row timeline",
+                    super::widgets::Slider {
+                        value: pct,
+                        min: 0.0,
+                        max: 100.0,
+                        steps: 200,
+                        onchange: move |v: f32| {
+                            scrub.set(Some(v / 100.0));
+                            seek_to(v / 100.0);
+                        },
+                        onrelease: move |_| {
+                            if let Some(f) = *scrub.peek() {
+                                let dur = progress.peek().1;
+                                progress.write().0 = (f * dur as f32) as u64;
+                            }
+                            scrub.set(None);
+                        },
+                    }
+                    span { class: "video-time", "{clock(pos)} / {clock(dur)}" }
+                    div {
+                        class: "icon-button",
+                        title: t("media.volume"),
+                        onclick: move |_| {
+                            let v = toggle_mute(*volume.peek());
+                            set_volume(v);
+                        },
+                        if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::VolumeX, size: 16 } }
+                    }
+                    div { class: "video-volume",
+                        super::widgets::Slider { value: *volume.read(), min: 0.0, max: 1.0, steps: 50, onchange: set_volume }
+                    }
+                }
+            }
+        }
+    } else {
+        rsx! {
         div {
-            class: if is_audio { "video-controls" } else { "video-controls overlay" },
+            class: "video-controls overlay",
             // Placed from the frame's top: Blitz put a `bottom: 0` box (and a
             // flex-end one) in the middle of the frame.
-            style: if is_audio { String::new() } else { format!("top: {}px; height: {OVERLAY_HEIGHT}px;", h.saturating_sub(OVERLAY_HEIGHT)) },
+            style: "top: {h.saturating_sub(OVERLAY_HEIGHT)}px; height: {OVERLAY_HEIGHT}px;",
             // Clicks on the controls don't play or pause.
             onclick: move |e| e.stop_propagation(),
             div { class: "icon-button", onclick: start,
                 if playing { Svg { icon: Icon::Pause, size: 16 } } else { Svg { icon: Icon::Play, size: 16 } }
-            }
-            if is_audio {
-                span { class: "video-name", "{attachment.name}" }
             }
             super::widgets::Slider {
                 value: pct,
@@ -504,7 +564,7 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
                 class: "icon-button",
                 title: t("media.volume"),
                 onclick: move |_| {
-                    let v = if *volume.peek() > 0.0 { 0.0 } else { 1.0 };
+                    let v = toggle_mute(*volume.peek());
                     set_volume(v);
                 },
                 if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::VolumeX, size: 16 } }
@@ -512,12 +572,11 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
             div { class: "video-volume",
                 super::widgets::Slider { value: *volume.read(), min: 0.0, max: 1.0, steps: 50, onchange: set_volume }
             }
-            if !is_audio {
-                div { class: "icon-button", title: t("media.fullscreen"), onclick: fullscreen,
-                    Svg { icon: Icon::Maximize, size: 16 }
-                }
+            div { class: "icon-button", title: t("media.fullscreen"), onclick: fullscreen,
+                Svg { icon: Icon::Maximize, size: 16 }
             }
             DownloadButton { attachment: attachment.clone() }
+        }
         }
     };
     let show_controls = is_audio || !playing || (hovered && active);
@@ -642,5 +701,19 @@ pub fn EmbedView(embed: Embed) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmuting_goes_back_to_the_volume_before() {
+        assert_eq!(toggle_mute(0.3), 0.0);
+        assert_eq!(toggle_mute(0.0), 0.3);
+        // Muted by the slider (no earlier level to go back to): full volume.
+        BEFORE_MUTE.with(|v| v.set(1.0));
+        assert_eq!(toggle_mute(0.0), 1.0);
     }
 }

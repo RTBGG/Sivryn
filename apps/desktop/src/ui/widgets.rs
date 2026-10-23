@@ -177,7 +177,11 @@ pub fn StatusDot(status: Option<UserStatus>, #[props(default)] class: String) ->
         Some(UserStatus::Dnd) => "dnd",
         Some(UserStatus::Invisible) | None => "offline",
     };
-    rsx! { div { class: "presence-dot {kind} {class}" } }
+    // Two circles: the outer one in the background's colour cuts the dot out
+    // of the avatar (a border showed seams and a fixed colour on hovered rows).
+    rsx! {
+        div { class: "presence-dot {kind} {class}", div { class: "presence-fill" } }
+    }
 }
 
 #[component]

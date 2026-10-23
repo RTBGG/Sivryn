@@ -570,7 +570,12 @@ h1, h2, h3 { margin: 0; }
   border-radius: 14px;
   background: var(--bg-3);
 }
-.composer input { flex-grow: 1; width: 0; padding: 10px 0; line-height: 20px; border: none; background: transparent; color: var(--text); caret-color: var(--text); }
+.composer input, .composer textarea { flex-grow: 1; width: 0; padding: 10px 0; line-height: 20px; border: none; background: transparent; color: var(--text); caret-color: var(--text); }
+/* The message box grows with its text, up to a third of the window. */
+/* Longer text scrolls inside it (with a scroll bar). */
+.composer textarea { max-height: 33vh; overflow-y: auto; resize: none; font: inherit; }
+.composer { align-items: flex-end; }
+.composer > .composer-button, .composer > .icon-button, .composer > .send-button { margin-bottom: 5px; }
 .composer.waiting { gap: 10px; color: var(--text-3); font-size: 0.9rem; }
 .send-button {
   display: flex;
@@ -967,23 +972,33 @@ h1, h2, h3 { margin: 0; }
   color: #ffffff;
 }
 .member-avatar { position: relative; display: flex; }
+/* The status dot: an outer circle in the background's colour (cutting it out
+   of the avatar) around the status colour. The outer one follows the row's
+   background when hovered or selected. */
 .presence-dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 12px;
-  height: 12px;
-  border: 3px solid var(--bg-1);
-  border-radius: 6px;
-  background: var(--text-3);
+  right: -3px;
+  bottom: -3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--bg-1);
 }
-.presence-dot.online { background: var(--green); }
-.presence-dot.idle { background: var(--yellow); }
-.presence-dot.dnd { background: var(--red); }
-.presence-dot.offline { background: var(--text-3); }
-.presence-dot.panel { border-color: var(--bg-0); }
-.presence-dot.inline { position: static; width: 10px; height: 10px; border: none; border-radius: 5px; flex-shrink: 0; }
-.presence-dot.large { right: 2px; bottom: 2px; width: 22px; height: 22px; border-width: 5px; border-radius: 11px; }
+.presence-fill { width: 10px; height: 10px; border-radius: 5px; background: var(--text-3); }
+.presence-dot.online .presence-fill { background: var(--green); }
+.presence-dot.idle .presence-fill { background: var(--yellow); }
+.presence-dot.dnd .presence-fill { background: var(--red); }
+.presence-dot.offline .presence-fill { background: var(--text-3); }
+.presence-dot.panel { background: var(--bg-0); }
+.user-info:hover .presence-dot.panel { background: var(--bg-hover); }
+.member:hover .presence-dot, .dm-entry:hover .presence-dot { background: var(--bg-hover); }
+.dm-entry.active .presence-dot { background: var(--bg-active); }
+.presence-dot.inline { position: static; width: 10px; height: 10px; background: transparent; flex-shrink: 0; }
+.presence-dot.large { right: 4px; bottom: 4px; width: 26px; height: 26px; border-radius: 13px; }
+.presence-dot.large .presence-fill { width: 16px; height: 16px; border-radius: 8px; }
 
 /* --- Top bar tabs ---------------------------------------------------------------- */
 
@@ -1252,6 +1267,14 @@ h1, h2, h3 { margin: 0; }
 
 .chat-video { display: flex; flex-direction: column; border-radius: 10px; background: var(--bg-3); overflow: hidden; }
 .chat-video.audio { width: 420px; }
+/* Audio: name and buttons on top, the timeline with time and volume below. */
+.audio-controls { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px 8px; }
+.audio-row { display: flex; align-items: center; gap: 8px; }
+.audio-row .slider { flex-grow: 1; }
+/* The slider thumbs reach 8 px past their track: inset so they line up with
+   the play and download icons above. */
+.audio-row.timeline { padding: 0 14px 0 13px; }
+.audio-name { flex-grow: 1; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 0.9rem; font-weight: 600; }
 .video-frame { position: relative; background: #000000; cursor: pointer; }
 .video-poster { position: absolute; left: 0; top: 0; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; color: #9a9eaa; font-size: 0.8rem; }
 .play-overlay {
@@ -1270,7 +1293,6 @@ h1, h2, h3 { margin: 0; }
 }
 .video-controls { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
 .video-controls .slider { flex-grow: 1; }
-.video-name { max-width: 140px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 0.85rem; font-weight: 600; }
 .video-time { color: var(--text-3); font-size: 0.75rem; white-space: nowrap; }
 .chat-file {
   display: flex;
@@ -1835,6 +1857,7 @@ h1, h2, h3 { margin: 0; }
 .channel, .category, .voice-member { position: relative; }
 .drop-zones { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: flex; flex-direction: column; }
 .drop-zone { flex-grow: 1; }
+.drop-zones.idle { display: none; }
 .drop-line { height: 2px; margin: 1px 8px; border-radius: 1px; background: var(--accent); }
 .channel.drop-into { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
 .voice-member.incoming { opacity: 0.5; }

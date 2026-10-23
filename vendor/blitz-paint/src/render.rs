@@ -509,11 +509,17 @@ impl ElementCx<'_> {
                 };
             }
 
-            // Render text
+            // Render text. Sivryn patch: only the lines in view, so a long
+            // text in a scrolling textarea doesn't cost every frame.
+            let top = self.node.scroll_offset.y * self.scale;
+            let bottom = top + self.frame.content_box.height();
             crate::text::stroke_text(
                 self.scale,
                 scene,
-                input_data.editor.try_layout().unwrap().lines(),
+                input_data.editor.try_layout().unwrap().lines().filter(|line| {
+                    let m = line.metrics();
+                    m.max_coord as f64 >= top && m.min_coord as f64 <= bottom
+                }),
                 self.context.dom,
                 pos,
             );

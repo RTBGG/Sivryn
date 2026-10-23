@@ -11,7 +11,7 @@ use sivryn_media::MediaPlayer;
 
 use super::AppState;
 use super::icons::{Icon, Svg};
-use super::media::{FrameCanvas, Frames, gain, remember_volume, remembered_volume};
+use super::media::{FrameCanvas, Frames, gain, remember_volume, remembered_volume, toggle_mute};
 use super::widgets::{IconButton, Slider};
 use crate::i18n::t;
 
@@ -229,8 +229,9 @@ fn VideoFull(player: PlayerRef) -> Element {
                     div {
                         class: "icon-button",
                         onclick: move |_| {
-                            let v = if *volume.peek() > 0.0 { 0.0 } else { 1.0 };
-                            mute(v);
+                            // Read first: a read guard alive while setting crashed.
+                            let current = *volume.peek();
+                            mute(toggle_mute(current));
                         },
                         if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 18 } } else { Svg { icon: Icon::VolumeX, size: 18 } }
                     }

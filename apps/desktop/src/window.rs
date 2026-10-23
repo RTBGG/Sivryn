@@ -33,8 +33,10 @@ pub fn flash() {
     imp::flash();
 }
 
-/// Brings the window to the front (e.g. after clicking a notification).
+/// Brings the window to the front (e.g. after clicking a notification),
+/// also when it was hidden to the notification area.
 pub fn bring_to_front() {
+    blitz_shell::window_control::show_and_focus();
     #[cfg(windows)]
     imp::bring_to_front();
 }

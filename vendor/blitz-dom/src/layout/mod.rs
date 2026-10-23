@@ -158,15 +158,36 @@ impl LayoutPartialTree for BaseDocument {
                             .attr(local_name!("cols"))
                             .and_then(|val| val.parse::<f32>().ok());
 
+                        // Sivryn patch: the text wraps at the textarea's width
+                        // (upstream laid it out on one endless line), and with
+                        // `data-autogrow` the textarea is as tall as its text.
+                        let autogrow = element_data.attrs().iter().any(|a| &*a.name.local == "data-autogrow");
+                        let scale = tree.viewport.scale_f64() as f32;
+                        let line_height = resolved_line_height.unwrap_or(16.0);
+                        let fallback_width = cols.map(|cols| cols * font_size.unwrap_or(16.0) * 0.6).unwrap_or(300.0);
+                        let font_ctx = &tree.font_ctx;
+                        let layout_ctx = &mut tree.layout_ctx;
+                        let style = &node.style;
+                        let input = element_data.text_input_data_mut();
                         return compute_leaf_layout(
                             inputs,
-                            &node.style,
+                            style,
                             resolve_calc_value,
-                            |_known_size, _available_space| taffy::Size {
-                                width: cols
-                                    .map(|cols| cols * font_size.unwrap_or(16.0) * 0.6)
-                                    .unwrap_or(300.0),
-                                height: resolved_line_height.unwrap_or(16.0) * rows,
+                            |known_size, available_space| {
+                                let width = known_size
+                                    .width
+                                    .or_else(|| available_space.width.into_option())
+                                    .unwrap_or(fallback_width);
+                                let text_height = input.map(|input| {
+                                    input.set_wrap_width(width * scale);
+                                    let mut font_ctx = font_ctx.lock().unwrap();
+                                    input.editor.layout(&mut font_ctx, layout_ctx).height() / scale
+                                });
+                                let height = match (autogrow, text_height) {
+                                    (true, Some(h)) => h.max(line_height),
+                                    _ => line_height * rows,
+                                };
+                                taffy::Size { width, height }
                             },
                         );
                     }

@@ -34,6 +34,7 @@ mod call;
 mod channels;
 mod chat_view;
 mod crop;
+mod desktop;
 mod dnd;
 mod emoji_picker;
 mod fullscreen;
@@ -139,6 +140,7 @@ pub enum SettingsPage {
     Keybinds,
     Appearance,
     Notifications,
+    Windows,
     About,
 }
 
@@ -1297,8 +1299,15 @@ pub fn App() -> Element {
         spawn_forever(async move {
             while let Some(event) = events.recv().await {
                 match event {
-                    HotkeyEvent::ToggleMute => state.set_muted(!*state.muted.peek()),
-                    HotkeyEvent::ToggleDeafen => state.set_deafened(!*state.deafened.peek()),
+                    // Read first: a read guard alive while setting crashed.
+                    HotkeyEvent::ToggleMute => {
+                        let muted = *state.muted.peek();
+                        state.set_muted(!muted);
+                    }
+                    HotkeyEvent::ToggleDeafen => {
+                        let deafened = *state.deafened.peek();
+                        state.set_deafened(!deafened);
+                    }
                     HotkeyEvent::Captured(bind) => captured.set(Some(bind)),
                 }
             }
@@ -1407,12 +1416,14 @@ pub fn App() -> Element {
     });
 
     use_hook(move || updates::start(state));
+    use_hook(move || desktop::start(state));
 
     // Apply settings whenever they change.
     use_effect(move || {
         let s = state.settings.read();
         services.engine.set_config(s.audio.clone());
         services.hotkeys.set_binds(s.keybinds.clone());
+        desktop::apply_settings(s.close_to_tray, s.autostart);
         drop(s);
         services.engine.set_volumes(state.effective_volumes());
     });
@@ -1437,6 +1448,18 @@ pub fn App() -> Element {
         // Keyed by theme and language: Blitz bakes icon colors and text at build
         // time, so switching either rebuilds the tree.
         div { key: "{theme}-{lang}", class: "root theme-{theme} {compact}",
+            // Drags that may leave their element (sliders, the zoom overview)
+            // and hover follow every move over the whole window, overlays too.
+            onmousemove: move |e| {
+                use dioxus_native::prelude::dioxus_elements::input_data::MouseButton;
+                widgets::slider_pointer_move(e.client_coordinates().x, e.held_buttons().contains(MouseButton::Primary));
+                widgets::hover_root_move();
+                call::minimap_pointer_move(&e);
+            },
+            onmouseup: move |_| {
+                widgets::slider_pointer_up();
+                call::minimap_pointer_up();
+            },
             style { {STYLE} }
             style { {dynamic_css} }
             if *state.restoring.read() {

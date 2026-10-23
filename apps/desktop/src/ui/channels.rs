@@ -330,19 +330,25 @@ fn ChannelRow(channel: Channel, selected: bool, afk: bool) -> Element {
                         }
                     }
                 }
-                match dragging {
-                    Some(dnd::DragItem::Channel(_)) => rsx! {
-                        div { class: "drop-zones",
+                // Always there (hidden unless something is dragged): an empty
+                // placeholder in its place counted as a flex item with a gap,
+                // so the buttons moved when a drag started.
+                div {
+                    class: match dragging {
+                        Some(dnd::DragItem::Channel(_)) => "drop-zones",
+                        Some(dnd::DragItem::Member { .. }) if voice => "drop-zones",
+                        _ => "drop-zones idle",
+                    },
+                    match dragging {
+                        Some(dnd::DragItem::Channel(_)) => rsx! {
                             div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::BeforeChannel(id)) }
                             div { class: "drop-zone", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::AfterChannel(id)) }
-                        }
-                    },
-                    Some(dnd::DragItem::Member { .. }) if voice => rsx! {
-                        div { class: "drop-zones",
+                        },
+                        Some(dnd::DragItem::Member { .. }) if voice => rsx! {
                             div { class: "drop-zone full", onmousemove: move |_| dnd::set_target(state, dnd::DropTarget::Voice(id)) }
-                        }
-                    },
-                    _ => rsx! {},
+                        },
+                        _ => rsx! {},
+                    }
                 }
             }
             if target == Some(dnd::DropTarget::AfterChannel(id)) {

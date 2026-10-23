@@ -68,6 +68,8 @@ pub(crate) fn handle_keypress<F: FnMut(DomEvent)>(
                     }
                 }
             }
+            // Sivryn patch: a scrolling textarea follows the caret.
+            crate::input_editing::keep_caret_visible(doc, node_id);
         }
     }
 }

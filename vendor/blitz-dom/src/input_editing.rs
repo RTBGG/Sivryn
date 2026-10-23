@@ -123,6 +123,29 @@ pub fn take_request() -> Option<(usize, Edit)> {
     lock(&PENDING).take()
 }
 
+/// Scrolls a textarea taller than its box so the caret stays in view.
+pub(crate) fn keep_caret_visible(doc: &mut BaseDocument, node_id: usize) {
+    let scale = doc.viewport.scale_f64();
+    let Some(node) = doc.nodes.get_mut(node_id) else { return };
+    let layout = node.final_layout;
+    let Some(input) = node.element_data().and_then(|e| e.text_input_data()) else { return };
+    if !input.is_multiline {
+        return;
+    }
+    let Some(text) = input.editor.try_layout() else { return };
+    let caret = input.editor.raw_selection().focus().geometry(text, 1.0);
+    let (top, bottom) = (caret.y0 / scale, caret.y1 / scale);
+    let visible = (layout.size.height - layout.padding.top - layout.padding.bottom - layout.border.top - layout.border.bottom) as f64;
+    let max = layout.scroll_height() as f64;
+    let mut scroll = node.scroll_offset.y;
+    if top < scroll {
+        scroll = top;
+    } else if bottom > scroll + visible {
+        scroll = bottom - visible;
+    }
+    node.scroll_offset.y = scroll.clamp(0.0, max.max(0.0));
+}
+
 /// Asks to focus the element with this `id` at the shell's next poll.
 pub fn request_focus(id: &str) {
     *lock(&FOCUS) = Some(id.to_owned());

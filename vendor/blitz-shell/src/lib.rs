@@ -15,6 +15,7 @@ pub mod file_drop;
 pub mod canvas_frames;
 pub mod escape;
 pub mod fullscreen;
+pub mod window_control;
 pub mod scrolling;
 mod net;
 mod window;
