@@ -130,9 +130,10 @@ git push origin v0.1.0-alpha.2
 It attaches the installer (`Sivryn.Desktop-win-Setup.exe`), the update packages and feed,
 a portable `sivryn-desktop-<tag>-windows-x64.exe` and `SHA256SUMS.txt` to the GitHub release
 and pushes the server image to `ghcr.io/rtbgg/sivryn-server:<version>`. Tags with a suffix such
-as `-alpha.2` become pre-releases and don't update the image's `latest` tag. If you want custom
-release notes, create the release on GitHub before pushing the tag; the workflow then only adds
-the files. Otherwise it generates notes from the commits.
+as `-alpha.2` become pre-releases and don't update the image's `latest` tag. Release notes come
+from the tag's section in [`CHANGELOG.md`](CHANGELOG.md) (`## v0.1.0-alpha.15`), so add it
+before tagging; they also go into the update package. Without a section, a release drafted by
+hand on GitHub keeps its notes, otherwise GitHub generates them from the commits.
 
 Installed clients update themselves from these releases (pre-releases included) through
 [Velopack](https://velopack.io): they check at start and every six hours, download in the

@@ -25,6 +25,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p sivryn-desktop
 
+      # The tag's section of CHANGELOG.md: notes for the release and the update.
+      - name: Release notes
+        shell: bash
+        run: |
+          awk -v tag="## $GITHUB_REF_NAME" '
+            $0 == tag { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md | sed '/./,$!d' > release-notes.md
+          if [[ -s release-notes.md ]]; then cat release-notes.md; else echo "No CHANGELOG.md section for $GITHUB_REF_NAME."; fi
+
       - name: Package
         shell: bash
         run: |
@@ -56,7 +67,8 @@ jobs:
           before=$(ls releases)
           vpk pack --packId Sivryn.Desktop --packVersion "$version" --packTitle Sivryn \
             --packAuthors RTBGG --packDir publish --mainExe sivryn-desktop.exe \
-            --icon apps/desktop/assets/icons/sivryn.ico --channel win --outputDir releases
+            --icon apps/desktop/assets/icons/sivryn.ico --channel win --outputDir releases \
+            $( [[ -s release-notes.md ]] && echo --releaseNotes release-notes.md )
           # Sign the feed: the client ignores feeds without a valid signature.
           printf '%s\n' "$UPDATE_SIGNING_KEY" > signing-key.pem
           openssl pkeyutl -sign -rawin -inkey signing-key.pem \
@@ -75,15 +87,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Keep notes of a release that was drafted by hand before tagging;
-          # otherwise create one with generated notes.
+          # Notes from CHANGELOG.md; without a section, keep notes of a release
+          # drafted by hand before tagging, or let GitHub generate them.
+          notes=(--generate-notes)
+          if [[ -s release-notes.md ]]; then
+            notes=(--notes-file release-notes.md)
+          fi
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             flags=()
             if [[ "$GITHUB_REF_NAME" == *-* ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            gh release create "$GITHUB_REF_NAME" --verify-tag "${notes[@]}" \
               --title "Sivryn $GITHUB_REF_NAME" "${flags[@]}"
+          elif [[ -s release-notes.md ]]; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
           fi
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
