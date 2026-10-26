@@ -114,7 +114,7 @@ pub fn ImageAttachment(
     };
 
     rsx! {
-        div { class: "chat-image", style: "width: {w}px; height: {h}px;", title: "{title}", onclick: open,
+        div { class: "chat-image", style: "width: {w}px; aspect-ratio: {w} / {h};", title: "{title}", onclick: open,
             onmousedown: move |e| {
                 if let Some((x, y)) = menu::right_click(&e) {
                     e.stop_propagation();
@@ -312,6 +312,8 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
     let mut scrub = use_signal(|| None::<f32>);
     let mut resume_at = use_signal(|| 0u64);
     let mut volume = use_signal(remembered_volume);
+    // A volume drag keeps its pop-up open when the pointer leaves it.
+    let mut volume_drag = use_signal(|| false);
     // Fullscreen was asked for before the video was loaded.
     let mut want_full = use_signal(|| false);
     // The controls lie over the picture and hide while the mouse rests on
@@ -534,8 +536,9 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
         div {
             class: "video-controls overlay",
             // Placed from the frame's top: Blitz put a `bottom: 0` box (and a
-            // flex-end one) in the middle of the frame.
-            style: "top: {h.saturating_sub(OVERLAY_HEIGHT)}px; height: {OVERLAY_HEIGHT}px;",
+            // flex-end one) in the middle of the frame. The frame shrinks in a
+            // narrow chat, so from its bottom edge rather than a fixed height.
+            style: "top: 100%; margin-top: -{OVERLAY_HEIGHT}px; height: {OVERLAY_HEIGHT}px;",
             // Clicks on the controls don't play or pause.
             onclick: move |e| e.stop_propagation(),
             div { class: "icon-button", onclick: start,
@@ -559,18 +562,32 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
                 },
             }
             span { class: "video-time", "{clock(pos)} / {clock(dur)}" }
-            // Volume: click the speaker to mute, the slider for 0–100 %.
-            div {
-                class: "icon-button",
-                title: t("media.volume"),
-                onclick: move |_| {
-                    let v = toggle_mute(*volume.peek());
-                    set_volume(v);
-                },
-                if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::VolumeX, size: 16 } }
-            }
-            div { class: "video-volume",
-                super::widgets::Slider { value: *volume.read(), min: 0.0, max: 1.0, steps: 50, onchange: set_volume }
+            // Volume: click the speaker to mute; hovering it shows a vertical
+            // slider for 0–100 % above it (the row has no room for a wide one).
+            div { class: if *volume_drag.read() { "volume-hover open" } else { "volume-hover" },
+                div { class: "volume-pop",
+                    super::widgets::Slider {
+                        value: *volume.read(),
+                        min: 0.0,
+                        max: 1.0,
+                        steps: 50,
+                        vertical: true,
+                        onchange: move |v| {
+                            volume_drag.set(true);
+                            set_volume(v);
+                        },
+                        onrelease: move |_| volume_drag.set(false),
+                    }
+                }
+                div {
+                    class: "icon-button",
+                    title: t("media.volume"),
+                    onclick: move |_| {
+                        let v = toggle_mute(*volume.peek());
+                        set_volume(v);
+                    },
+                    if *volume.read() > 0.0 { Svg { icon: Icon::Volume, size: 16 } } else { Svg { icon: Icon::VolumeX, size: 16 } }
+                }
             }
             div { class: "icon-button", title: t("media.fullscreen"), onclick: fullscreen,
                 Svg { icon: Icon::Maximize, size: 16 }
@@ -583,9 +600,9 @@ pub fn VideoAttachment(attachment: Attachment) -> Element {
 
     rsx! {
         div { class: if is_audio { "chat-video audio" } else { "chat-video" },
-            style: if is_audio { String::new() } else { format!("width: {w}px;") },
+            style: if is_audio { String::new() } else { format!("width: {w}px; aspect-ratio: {w} / {h};") },
             if !is_audio {
-                div { class: "video-frame", style: "height: {h}px;", onclick: start_frame,
+                div { class: "video-frame", onclick: start_frame,
                     onmousemove: move |e| {
                         mark(e);
                         kick();

@@ -728,16 +728,15 @@ impl Node {
 
         let mut x = box_x + self.scroll_offset.x as f32;
         let mut y = box_y + self.scroll_offset.y as f32;
-        let content_size = self.final_layout.content_size;
-        let matches_content =
-            !(x < 0.0 || x > content_size.width || y < 0.0 || y > content_size.height);
-
         // Content overflowing a clipping (scrolling or hidden) box is invisible.
+        // Sivryn patch: other boxes are always searched. Taffy's content size starts at the
+        // box's origin, so content above or left of it (a pop-up placed with a negative `top`)
+        // was never hit and clicks went through it.
         let clips = self.primary_styles().is_some_and(|s| {
             !matches!(s.clone_overflow_x(), style::values::computed::Overflow::Visible)
                 || !matches!(s.clone_overflow_y(), style::values::computed::Overflow::Visible)
         });
-        if !matches_self && (clips || !matches_content) {
+        if !matches_self && clips {
             return None;
         }
 

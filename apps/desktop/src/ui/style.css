@@ -234,6 +234,12 @@ h1, h2, h3 { margin: 0; }
 }
 .slider-hit { position: absolute; left: -8px; right: -8px; top: 0; bottom: 0; display: flex; cursor: pointer; }
 .slider-hit > div { flex-grow: 1; height: 100%; }
+.slider.vertical { width: 24px; height: 100%; justify-content: center; }
+.slider.vertical .slider-track { left: 9px; right: auto; top: 0; width: 6px; height: 100%; }
+.slider.vertical .slider-fill { width: 6px; }
+.slider.vertical .slider-thumb { left: 4px; }
+.slider.vertical .slider-hit { left: 0; right: 0; top: -8px; bottom: -8px; flex-direction: column-reverse; }
+.slider.vertical .slider-hit > div { width: 100%; height: auto; }
 
 .select { position: relative; }
 .select-button {
@@ -745,7 +751,7 @@ h1, h2, h3 { margin: 0; }
   border-radius: 12px;
   background: var(--bg-3);
 }
-.invite-code .code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 1.2rem; font-weight: 700; letter-spacing: 0.08em; }
+.invite-code .code { min-width: 0; font-family: "Cascadia Mono", Consolas, monospace; font-size: 1rem; font-weight: 700; overflow-wrap: anywhere; }
 
 .share-options { display: flex; flex-direction: column; gap: 12px; padding: 12px; border-radius: 12px; background: var(--bg-2); }
 .share-option { display: flex; flex-direction: column; }
@@ -1202,6 +1208,8 @@ h1, h2, h3 { margin: 0; }
 .frame-canvas.blurred { opacity: 0.5; }
 .chat-image {
   position: relative;
+  /* Narrower in a narrow chat (member list shown); aspect-ratio keeps the height in step. */
+  max-width: 100%;
   border-radius: 10px;
   background: var(--bg-3);
   overflow: hidden;
@@ -1265,7 +1273,7 @@ h1, h2, h3 { margin: 0; }
 .viewer-name { flex-grow: 1; font-weight: 700; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .viewer-bar .icon-button { color: #c9cbd3; }
 
-.chat-video { display: flex; flex-direction: column; border-radius: 10px; background: var(--bg-3); overflow: hidden; }
+.chat-video { max-width: 100%; display: flex; flex-direction: column; border-radius: 10px; background: var(--bg-3); overflow: hidden; }
 .chat-video.audio { width: 420px; }
 /* Audio: name and buttons on top, the timeline with time and volume below. */
 .audio-controls { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px 8px; }
@@ -1275,7 +1283,7 @@ h1, h2, h3 { margin: 0; }
    the play and download icons above. */
 .audio-row.timeline { padding: 0 14px 0 13px; }
 .audio-name { flex-grow: 1; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 0.9rem; font-weight: 600; }
-.video-frame { position: relative; background: #000000; cursor: pointer; }
+.video-frame { position: relative; flex-grow: 1; background: #000000; cursor: pointer; }
 .video-poster { position: absolute; left: 0; top: 0; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; color: #9a9eaa; font-size: 0.8rem; }
 .play-overlay {
   position: absolute;
@@ -1328,6 +1336,11 @@ h1, h2, h3 { margin: 0; }
 /* --- Member list -------------------------------------------------------------------- */
 
 .member-list { width: 240px; min-width: 240px; padding: 8px 8px 16px; border-left: 1px solid var(--border); background: var(--bg-1); overflow-y: auto; }
+/* The chat keeps at least 480 px: in a narrower window (72 rail + 252 channels + 480 + 240
+   members) the member list and its button step aside until the window grows again. */
+@media (max-width: 1043.98px) {
+  .member-list, .members-toggle { display: none; }
+}
 .member-section {
   display: flex;
   align-items: center;
@@ -1969,6 +1982,24 @@ h1, h2, h3 { margin: 0; }
 .crop-zoom { display: flex; align-items: center; gap: 10px; color: var(--text-3); }
 .crop-zoom .slider { flex-grow: 1; }
 .video-volume { width: 70px; min-width: 70px; }
+/* A video shrunk by a narrow chat gives up the time before the timeline. */
+.video-controls.overlay > .slider { min-width: 48px; }
+.video-controls.overlay .video-time { min-width: 0; flex-shrink: 1; overflow: hidden; }
+/* Chat videos: the volume slider stands above the speaker while it is hovered (or dragged). */
+.volume-hover { position: relative; }
+.volume-pop {
+  position: absolute;
+  left: -4px;
+  top: -112px;
+  display: none;
+  width: 36px;
+  height: 112px;
+  box-sizing: border-box;
+  padding: 14px 6px 22px;
+  border-radius: 8px;
+  background: #000000cc;
+}
+.volume-hover:hover .volume-pop, .volume-hover.open .volume-pop { display: flex; }
 
 .voice-area > .call { min-width: 0; overflow: hidden; }
 .role-chips { display: flex; flex-wrap: wrap; gap: 6px; }

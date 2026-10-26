@@ -25,6 +25,9 @@ pub struct Config {
     pub files_dir: std::path::PathBuf,
     /// Largest accepted upload in bytes (`SIVRYN_MAX_UPLOAD_MB`, default 100).
     pub max_upload_bytes: u64,
+    /// GitHub repository (`owner/name`) whose newest release the web page offers
+    /// for download (`SIVRYN_DOWNLOAD_REPO`, default `RTBGG/Sivryn`, empty for none).
+    pub download_repo: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +108,8 @@ impl Config {
             oidc,
             files_dir: var_or("SIVRYN_FILES_DIR", "/data/files").into(),
             max_upload_bytes: parse_or::<u64>("SIVRYN_MAX_UPLOAD_MB", 100)? * 1024 * 1024,
+            download_repo: Some(var_or("SIVRYN_DOWNLOAD_REPO", "RTBGG/Sivryn").trim().to_owned())
+                .filter(|r| !r.is_empty()),
         })
     }
 }

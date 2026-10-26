@@ -77,6 +77,10 @@ fn handle(mut state: AppState, event: ShellEvent) {
     tracing::debug!(?event, "shell event");
     match event {
         ShellEvent::Open => blitz_shell::window_control::show_and_focus(),
+        ShellEvent::Invite => {
+            blitz_shell::window_control::show_and_focus();
+            super::invites::arrived(state);
+        }
         ShellEvent::CheckForUpdates => {
             blitz_shell::window_control::show_and_focus();
             state.settings_page.set(Some(super::SettingsPage::About));

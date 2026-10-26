@@ -11,6 +11,7 @@ mod files;
 mod history;
 mod hotkeys;
 mod i18n;
+mod links;
 mod mentions;
 mod messages;
 mod native_icon;
@@ -40,10 +41,16 @@ fn main() {
         .init();
     install_crash_log();
     // Already running (perhaps hidden in the notification area): that one
-    // shows its window, this one ends.
-    if tray::already_running() {
+    // shows its window (and gets the invite link this was started with), this
+    // one ends.
+    let link = links::from_args();
+    if tray::already_running(link.as_deref()) {
         return;
     }
+    if let Some(invite) = link.as_deref().and_then(links::parse) {
+        links::set_pending(invite);
+    }
+    links::register();
     // An update downloaded in an earlier session: install it and restart.
     updater::apply_pending();
     sivryn_client_core::install_crypto_provider();

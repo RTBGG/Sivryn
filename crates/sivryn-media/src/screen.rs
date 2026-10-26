@@ -37,7 +37,8 @@ pub(crate) fn capturer(kind: SourceKind) -> Option<DesktopCapturer> {
         SourceKind::Window => DesktopCaptureSourceType::Window,
     };
     let mut options = DesktopCapturerOptions::new(source_type);
-    options.set_include_cursor(true);
+    // The pointer is drawn by `cursor.rs` (libwebrtc's DXGI capturer has none).
+    options.set_include_cursor(false);
     DesktopCapturer::new(options)
 }
 
@@ -202,6 +203,7 @@ async fn spawn_capture(
                 started: Instant::now(),
                 last_preview: Instant::now() - PREVIEW_INTERVAL,
             };
+            let mut pointer = crate::cursor::CursorOverlay::new(&source);
 
             #[cfg(windows)]
             if let Some(hdr_display) = crate::hdr_capture::hdr_display(&source) {
@@ -214,15 +216,26 @@ async fn spawn_capture(
                         );
                         let _ = ready_tx.send(Ok(()));
                         let mut next = Instant::now();
+                        let mut last: Option<(Vec<u8>, u32, u32)> = None;
                         while !stop.load(Ordering::Relaxed) {
-                            if let Some((data, w, h)) = hdr.next_frame() {
+                            // Without a new picture, the last one goes out again
+                            // when only the pointer moved (Windows sends no frame then).
+                            let fresh = hdr.next_frame();
+                            let is_fresh = fresh.is_some();
+                            if is_fresh {
+                                last = fresh;
+                            }
+                            let current = last.as_ref().filter(|(_, w, h)| is_fresh || pointer.moved(*w, *h));
+                            if let Some((data, w, h)) = current {
+                                let (w, h) = (*w, *h);
                                 let (ew, eh) = (w & !1, h & !1);
                                 if ew > 0 && eh > 0 {
                                     let mut i420 = I420Buffer::new(ew, eh);
                                     let (sy, su, sv) = i420.strides();
                                     let (y, u, v) = i420.data_mut();
                                     // RGBA, which libyuv calls "ABGR".
-                                    yuv_helper::abgr_to_i420(&data, w * 4, y, sy, u, su, v, sv, ew as i32, eh as i32);
+                                    yuv_helper::abgr_to_i420(data, w * 4, y, sy, u, su, v, sv, ew as i32, eh as i32);
+                                    pointer.draw(&mut i420);
                                     delivery.frame(i420, ew, eh);
                                 }
                             }
@@ -258,6 +271,7 @@ async fn spawn_capture(
                     let (sy, su, sv) = i420.strides();
                     let (y, u, v) = i420.data_mut();
                     yuv_helper::argb_to_i420(frame.data(), frame.stride(), y, sy, u, su, v, sv, w, h);
+                    pointer.draw(&mut i420);
                     delivery.frame(i420, w as u32, h as u32);
                 }
                 Err(e) => tracing::trace!(?e, "capture frame failed"),

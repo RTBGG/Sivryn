@@ -26,6 +26,20 @@ pub struct InstanceInfo {
     pub oidc_enabled: bool,
 }
 
+/// What an invite link leads to, shown before joining (no sign-in needed).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InvitePreview {
+    pub instance_name: String,
+    /// The server a server invite joins; `None` for an instance invite (registration only).
+    pub guild: Option<InviteGuild>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InviteGuild {
+    pub name: String,
+    pub member_count: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistrationMode {

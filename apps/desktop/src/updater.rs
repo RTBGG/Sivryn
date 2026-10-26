@@ -30,7 +30,12 @@ const PUBLIC_KEY: [u8; 32] = [
 /// Runs Velopack's install, update and uninstall hooks. Must come first in
 /// `main`: during those hooks the process exits here.
 pub fn run_hooks() {
-    velopack::VelopackApp::build().on_before_uninstall_fast_callback(|_| crate::autostart::remove()).run();
+    velopack::VelopackApp::build()
+        .on_before_uninstall_fast_callback(|_| {
+            crate::autostart::remove();
+            crate::links::remove();
+        })
+        .run();
 }
 
 /// The version that is running.

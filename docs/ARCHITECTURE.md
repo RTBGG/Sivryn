@@ -74,6 +74,11 @@ puts screen sharing quality first, then easy self-hosting, then everything else.
    a D3D11 compute shader: divide by Windows' SDR white level (so SDR content looks as on an
    SDR screen), keep values below a knee, roll the highlights off smoothly, encode as sRGB.
    The result enters the normal path through libyuv.
+   **Mouse pointer**: both paths capture without it (libwebrtc's DXGI capturer never draws one,
+   and on the HDR path it is up to Windows). Sivryn draws the current pointer into each I420
+   frame instead: its shape rendered once per cursor on black and white (for transparency,
+   including inverting cursors), placed by the source's screen or window rectangle. When only
+   the pointer moved, the HDR path sends its last frame again with the pointer in its new place.
 5. **Receive**: decoded frames → RGBA → `watch` channel (latest frame only, no lag build-up)
    → `VideoSurface` uploads to a wgpu texture and draws it letterboxed into the canvas.
 
@@ -160,6 +165,21 @@ far behind is disconnected and resyncs on reconnect.
 
 Presence carries a status (online, away, busy). Invisible users are announced as offline to
 everyone else; busy users get no desktop notifications.
+
+## Invite links
+
+The server answers `/` with a page about the instance and a download of the newest desktop
+installer (the newest GitHub release, pre-releases included, cached for ten minutes), and
+`/{code}` or `/invite/{code}` with the invite: server name, member count, and a button to open
+`sivryn://join/{host}/{code}`, which the page also tries right away. `GET /api/v1/invites/{code}`
+gives the same preview without signing in.
+
+Installed clients register the `sivryn` scheme under `HKCU\Software\Classes` on every start
+(the uninstaller removes it). Started with a link while Sivryn already runs, the new process
+hands the link to the running one (`WM_COPYDATA` to its notification area window) and ends.
+Signed in to the link's instance, the client joins at once; signed out, the login screen is
+filled in with the instance and the code; signed in elsewhere, it offers to sign out and go
+there.
 
 ## Roles and channel permissions
 

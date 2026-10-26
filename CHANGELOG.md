@@ -3,6 +3,41 @@
 What changed in each release, newest first. The release workflow uses the section of a tag as
 the notes of its GitHub release and of its update.
 
+## v0.1.0-alpha.18
+
+### Fixed
+
+- Memory use no longer grows while the window is open. Every layout pass (a blinking text cursor,
+  a playing GIF or video) left a few nodes behind in Blitz, which added up to hundreds of
+  megabytes over time.
+
+### Media
+
+- Images, GIFs and videos shrink with the chat when it gets narrow (member list shown, small
+  window), keeping their aspect ratio. Before, only text did, and media ran under the member
+  list.
+- The chat keeps at least 480 px: in a narrower window the member list (and its button) steps
+  aside until the window is wide enough again.
+- Chat videos show their volume slider upright above the speaker while it is hovered, which
+  leaves the timeline more room.
+
+### Invite links
+
+- Invites are links now (`https://chat.sivryn.com/CODE`, also `…/invite/CODE`); "Invite friends"
+  copies the link. Opening one starts Sivryn: signed in, it joins the server right away; signed
+  out, the login screen is filled in with the instance and the invite code; signed in to another
+  instance, it offers to sign out and join there. Pasting a link into "Join a server" or the
+  registration's invite field works too.
+- The instance's address shows a small page with a download of the newest Sivryn, and invite
+  links show the server's name and member count with buttons to open Sivryn or download it.
+- Needs the server update.
+
+### Screen sharing
+
+- The mouse pointer shows in screen shares again. Sivryn now draws it into the picture itself,
+  the same way on every screen (libwebrtc's capture on many PCs had no pointer at all), and it
+  follows the mouse even when nothing else on the screen changes.
+
 ## v0.1.0-alpha.17
 
 ### Fixed

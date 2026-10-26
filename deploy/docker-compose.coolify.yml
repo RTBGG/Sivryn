@@ -45,6 +45,8 @@ services:
       - SIVRYN_CAMERA_MAX_FPS=${SIVRYN_CAMERA_MAX_FPS:-60}
       - SIVRYN_CAMERA_MAX_BITRATE=${SIVRYN_CAMERA_MAX_BITRATE:-8000000}
       - SIVRYN_MAX_UPLOAD_MB=${SIVRYN_MAX_UPLOAD_MB:-100}
+      # Repository whose newest release the instance's web page offers; empty hides it.
+      - SIVRYN_DOWNLOAD_REPO=${SIVRYN_DOWNLOAD_REPO-RTBGG/Sivryn}
       - RUST_LOG=${RUST_LOG:-info}
     volumes:
       # Uploaded files (encrypted attachments, server icons).

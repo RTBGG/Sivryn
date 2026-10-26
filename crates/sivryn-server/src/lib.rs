@@ -23,6 +23,7 @@ mod gateway;
 pub mod presence;
 mod routes;
 mod storage;
+mod web;
 
 use config::Config;
 use events::EventBus;
@@ -81,6 +82,10 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", routes::api(state.config.max_upload_bytes))
         .route("/gateway", get(gateway::handler))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/", get(web::home))
+        .route("/logo.png", get(web::logo))
+        .route("/invite/{code}", get(web::invite))
+        .route("/{code}", get(web::invite))
         .layer(CompressionLayer::new())
         // Clients are native apps or served from the same origin; CORS is
         // permissive so third-party web clients can talk to any instance.

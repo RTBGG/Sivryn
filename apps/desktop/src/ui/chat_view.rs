@@ -106,7 +106,7 @@ pub fn ChatView(channel: ChannelId, #[props(default)] side: bool) -> Element {
                     IconButton {
                         icon: Icon::Users,
                         size: 18,
-                        class: if show_members { "active" } else { "" },
+                        class: if show_members { "members-toggle active" } else { "members-toggle" },
                         title: if show_members { t("members.hide") } else { t("members.show") },
                         onclick: move |_| state.update_settings(|s| s.member_list = !s.member_list),
                     }

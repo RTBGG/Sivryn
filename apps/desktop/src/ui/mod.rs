@@ -41,6 +41,7 @@ mod fullscreen;
 mod guild_settings;
 mod home;
 pub mod icons;
+mod invites;
 mod login;
 mod media;
 mod members;
@@ -129,6 +130,8 @@ pub enum Modal {
     /// "Join this voice channel?" (from a mention in the chat).
     JoinVoice(ChannelId),
     Profile(UserId),
+    /// "This invite is for another instance: sign out and go there?"
+    ForeignInvite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,6 +296,8 @@ pub struct AppState {
     pub connection: Signal<Connection>,
     pub toasts: Signal<Vec<Toast>>,
     pub gateway: Signal<Option<Task>>,
+    /// An invite link waiting for a session on its instance.
+    pub invite: Signal<Option<invites::PendingInvite>>,
 }
 
 impl AppState {
@@ -1080,6 +1085,7 @@ impl AppState {
         // Outlives the login screen, which unmounts now.
         let task = spawn_forever(self.run_gateway());
         self.gateway.set(Some(task));
+        invites::process(self);
     }
 
     /// Leaves any call, stops the gateway and returns to the login screen.
@@ -1282,6 +1288,7 @@ pub fn App() -> Element {
             connection: root(Connection::Offline),
             toasts: root(Vec::new()),
             gateway: root(None),
+            invite: root(None),
         }
     });
     use_context_provider(|| state);
@@ -1417,6 +1424,7 @@ pub fn App() -> Element {
 
     use_hook(move || updates::start(state));
     use_hook(move || desktop::start(state));
+    use_hook(move || invites::arrived(state));
 
     // Apply settings whenever they change.
     use_effect(move || {
@@ -1452,7 +1460,8 @@ pub fn App() -> Element {
             // and hover follow every move over the whole window, overlays too.
             onmousemove: move |e| {
                 use dioxus_native::prelude::dioxus_elements::input_data::MouseButton;
-                widgets::slider_pointer_move(e.client_coordinates().x, e.held_buttons().contains(MouseButton::Primary));
+                let at = e.client_coordinates();
+                widgets::slider_pointer_move(at.x, at.y, e.held_buttons().contains(MouseButton::Primary));
                 widgets::hover_root_move();
                 call::minimap_pointer_move(&e);
             },

@@ -80,12 +80,18 @@ upstream https://github.com/dioxuslabs/blitz, licensed MIT OR Apache-2.0. Search
 - `src/node/node.rs` (`Node::hit`): a node's own box is hit-tested before its scroll offset is
   applied, and content overflowing a clipping box is ignored. Upstream added the offset first,
   so clicks above or beside a scrolled container landed on its hidden, scrolled-away children.
+  Boxes that don't clip are always searched: Taffy's content size starts at the box's origin,
+  so content placed above or left of its parent (a pop-up with a negative `top`) was never hit.
   Inline text only counts as hit where a line actually has text: `Cluster::from_point` snaps
   to the nearest glyph, so a click in the empty rest of a line opened the link at its end.
 - `src/document.rs` (`is_animating`): a `<canvas>` no longer makes the document count as
   animating. Upstream repainted the whole window at the display's refresh rate for as long as
   any canvas existed; with Vello that cost 10–20 % of a fast GPU for one small (even still)
   image. Canvas sources request repaints themselves (see `canvas_frames.rs` in blitz-shell).
+- `src/document.rs` (`resolve_layout_children`): the anonymous blocks of a node's previous
+  layout children are removed before they are built again. Blitz builds them anew on every
+  layout pass and never dropped the old ones, so each relayout leaked nodes (with their text
+  layouts) and memory grew for as long as anything changed on screen.
 - `src/zoom_anchor.rs` (+ `document.rs`, `lib.rs`): a scroll container with a `data-zoom`
   attribute (the current scale) keeps the point of its content under the mouse in place when the
   scale changes (the middle when the mouse is elsewhere), instead of zoomed content growing from

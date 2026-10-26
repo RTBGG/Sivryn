@@ -1112,6 +1112,12 @@ impl BaseDocument {
 
             if NON_INCREMENTAL || damage.intersects(CONSTRUCT_FC | CONSTRUCT_BOX) {
                 //} || flags.contains(NodeFlags::IS_INLINE_ROOT) {
+                // Sivryn patch: drop the anonymous blocks of the previous construction. They
+                // were never removed, so every relayout leaked a set of nodes (with their text
+                // layouts) into the slab.
+                drop_anonymous_layout_children(doc, node_id);
+                doc.forget_removed_nodes();
+
                 let mut layout_children = Vec::new();
                 let mut anonymous_block: Option<usize> = None;
                 collect_layout_children(doc, node_id, &mut layout_children, &mut anonymous_block);
@@ -1149,6 +1155,24 @@ impl BaseDocument {
             }
 
             doc.nodes[node_id].set_damage(damage);
+        }
+
+        /// Removes the anonymous blocks among `node_id`'s layout children, and theirs. Pseudo
+        /// elements are anonymous blocks too but belong to the node and stay.
+        fn drop_anonymous_layout_children(doc: &mut BaseDocument, node_id: usize) {
+            let Some(old) = doc.nodes[node_id].layout_children.borrow_mut().take() else {
+                return;
+            };
+            let (before, after) = (doc.nodes[node_id].before, doc.nodes[node_id].after);
+            for id in old {
+                if Some(id) == before || Some(id) == after {
+                    continue;
+                }
+                if doc.nodes.get(id).is_some_and(|node| node.is_anonymous()) {
+                    drop_anonymous_layout_children(doc, id);
+                    doc.nodes.remove(id);
+                }
+            }
         }
     }
 

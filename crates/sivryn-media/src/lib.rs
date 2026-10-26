@@ -13,6 +13,7 @@ pub mod audio;
 pub mod call;
 pub mod camera;
 pub mod codec;
+mod cursor;
 mod hdr_capture;
 pub mod player;
 pub mod screen;

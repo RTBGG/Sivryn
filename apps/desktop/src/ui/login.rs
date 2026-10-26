@@ -19,6 +19,18 @@ pub fn Login() -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
+    // An invite link fills in its instance and code. Signing up is the likely
+    // next step, unless this is the instance signed in to last.
+    use_effect(move || {
+        let Some(pending) = state.invite.read().clone() else { return };
+        let known = state.settings.peek().last_instance.as_deref().is_some_and(|i| pending.invite.is_for(i));
+        instance.set(pending.invite.instance.clone());
+        invite_code.set(pending.invite.code.clone());
+        if !known {
+            register.set(true);
+        }
+    });
+
     let mut submit = move || {
         if *busy.read() {
             return;
@@ -31,11 +43,21 @@ pub fn Login() -> Element {
             // Clone out of the signals: their read guards must not live across `.await`.
             let (instance, username, password) = (instance.cloned(), username.cloned(), password.cloned());
             let code = invite_code.cloned();
-            let code = Some(code.trim()).filter(|c| !c.is_empty());
-            let result = Session::login(instance.trim(), username.trim(), &password, *register.peek(), code).await;
+            let code = Some(crate::links::code_from(&code)).filter(|c| !c.is_empty());
+            let registering = *register.peek();
+            let result = Session::login(instance.trim(), username.trim(), &password, registering, code).await;
             busy.set(false);
             match result {
-                Ok(session) => state.signed_in(session),
+                Ok(session) => {
+                    // Signing up with the link's code may have used it up.
+                    let mut invite = state.invite;
+                    let used =
+                        invite.peek().as_ref().is_some_and(|p| registering && Some(p.invite.code.as_str()) == code);
+                    if used && let Some(p) = invite.write().as_mut() {
+                        p.signed_up = true;
+                    }
+                    state.signed_in(session)
+                }
                 Err(e) => error.set(Some(e)),
             }
         });

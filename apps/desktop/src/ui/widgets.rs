@@ -200,7 +200,7 @@ pub fn Toggle(on: bool, onchange: EventHandler<bool>) -> Element {
 /// pointer leaves the slider, and can go past its ends to the minimum or
 /// maximum.
 struct SliderDrag {
-    /// The zone pressed first and the pointer's x there.
+    /// The zone pressed first and the pointer's x there (y for a vertical slider).
     start: (u32, f64),
     /// A zone crossed later (as far from the first as seen so far): with the
     /// first it tells how many pixels one step is.
@@ -208,6 +208,7 @@ struct SliderDrag {
     min: f32,
     max: f32,
     steps: u32,
+    vertical: bool,
     onchange: EventHandler<f32>,
     onrelease: Option<EventHandler<()>>,
 }
@@ -217,7 +218,7 @@ thread_local! {
 }
 
 /// A mouse move anywhere in the window (`held`: the left button is down).
-pub fn slider_pointer_move(x: f64, held: bool) {
+pub fn slider_pointer_move(x: f64, y: f64, held: bool) {
     if !held {
         slider_pointer_up();
         return;
@@ -225,6 +226,7 @@ pub fn slider_pointer_move(x: f64, held: bool) {
     let update = SLIDER_DRAG.with(|d| {
         let d = d.borrow();
         let d = d.as_ref()?;
+        let x = if d.vertical { y } else { x };
         let (ci, cx) = d.calibration?;
         let px_per_step = (cx - d.start.1) / (ci as f64 - d.start.0 as f64);
         if !px_per_step.is_finite() || px_per_step.abs() < 0.01 {
@@ -246,7 +248,7 @@ pub fn slider_pointer_up() {
     }
 }
 
-/// Horizontal slider. Blitz reports no element-relative mouse positions, so
+/// Horizontal (or `vertical`, the maximum on top) slider. Blitz reports no element-relative mouse positions, so
 /// the track is covered by invisible hit zones, one per step: pressing one
 /// selects its value. While dragging, the zones the pointer crosses measure
 /// the step width, and from then on the value follows the pointer's x
@@ -264,27 +266,38 @@ pub fn Slider(
     /// Called when a drag ends.
     #[props(default)]
     onrelease: Option<EventHandler<()>>,
+    /// Bottom to top; the slider's height comes from its CSS.
+    #[props(default)]
+    vertical: bool,
 ) -> Element {
     let frac = ((value - min) / (max - min)).clamp(0.0, 1.0);
     let pct = frac * 100.0;
     let level_pct = level.map(|l| ((l - min) / (max - min)).clamp(0.0, 1.0) * 100.0);
     let value_at = move |i: u32| min + (max - min) * (i as f32 / steps as f32);
 
+    // Vertical: the fill grows from the bottom, the zones run bottom to top.
+    let (fill, thumb) = if vertical {
+        (format!("top: {}%; height: {pct}%;", 100.0 - pct), format!("top: calc({}% - 8px);", 100.0 - pct))
+    } else {
+        (format!("width: {pct}%;"), format!("left: calc({pct}% - 8px);"))
+    };
+
     rsx! {
-        div { class: "slider",
+        div { class: if vertical { "slider vertical" } else { "slider" },
             div { class: "slider-track",
                 if let Some(level) = level_pct {
                     div { class: "slider-level", style: "width: {level}%;" }
                 }
-                div { class: "slider-fill", style: "width: {pct}%;" }
+                div { class: "slider-fill", style: "{fill}" }
             }
-            div { class: "slider-thumb", style: "left: calc({pct}% - 8px);" }
+            div { class: "slider-thumb", style: "{thumb}" }
             div { class: "slider-hit",
                 for i in 0..=steps {
                     div {
                         key: "{i}",
                         onmousedown: move |e| {
-                            let x = e.client_coordinates().x;
+                            let at = e.client_coordinates();
+                            let x = if vertical { at.y } else { at.x };
                             SLIDER_DRAG.with(|d| {
                                 *d.borrow_mut() = Some(SliderDrag {
                                     start: (i, x),
@@ -292,6 +305,7 @@ pub fn Slider(
                                     min,
                                     max,
                                     steps,
+                                    vertical,
                                     onchange,
                                     onrelease,
                                 })
@@ -299,7 +313,8 @@ pub fn Slider(
                             onchange.call(value_at(i));
                         },
                         onmousemove: move |e| {
-                            let x = e.client_coordinates().x;
+                            let at = e.client_coordinates();
+                            let x = if vertical { at.y } else { at.x };
                             let first = SLIDER_DRAG.with(|d| {
                                 let mut d = d.borrow_mut();
                                 let Some(d) = d.as_mut() else { return false };

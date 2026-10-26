@@ -10,6 +10,8 @@ mod files;
 mod friends;
 mod guilds;
 mod instance;
+
+pub(crate) use instance::preview;
 mod messages;
 mod mls;
 mod roles;
@@ -88,7 +90,7 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
         .route("/guilds/{guild_id}/voice", get(voice::guild_states))
         .route("/guilds/{guild_id}/channels", post(guilds::create_channel))
         .route("/guilds/{guild_id}/invites", post(guilds::create_invite))
-        .route("/invites/{code}", post(guilds::accept_invite))
+        .route("/invites/{code}", get(instance::invite_preview).post(guilds::accept_invite))
         .route("/channels/{channel_id}", axum::routing::patch(guilds::update_channel).delete(guilds::delete_channel))
         .route("/channels/{channel_id}/read", put(users::ack))
         .route("/channels/{channel_id}/mute", put(users::mute).delete(users::unmute))

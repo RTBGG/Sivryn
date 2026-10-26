@@ -19,6 +19,8 @@ pub enum ShellEvent {
     ToggleDeafen,
     ToggleCamera,
     HangUp,
+    /// A `sivryn://` invite arrived from another start (see `links::take`).
+    Invite,
 }
 
 /// What the tray icon's corner shows.
@@ -91,11 +93,14 @@ pub fn remove() {
 
 /// Whether Sivryn already runs; if so, it was asked to show its window and
 /// this process should end.
-pub fn already_running() -> bool {
+pub fn already_running(link: Option<&str>) -> bool {
     #[cfg(windows)]
-    return imp::already_running();
+    return imp::already_running(link);
     #[cfg(not(windows))]
-    false
+    {
+        let _ = link;
+        false
+    }
 }
 
 #[cfg(windows)]
@@ -103,17 +108,18 @@ mod imp {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::DataExchange::COPYDATASTRUCT;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::Shell::{
         NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW,
-        FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
-        RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_RETURNCMD,
-        TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP,
-        WM_TIMER, WNDCLASSW, WS_POPUP,
+        ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+        DestroyMenu, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON, MF_SEPARATOR,
+        MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendMessageW,
+        SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+        WINDOW_EX_STYLE, WM_APP, WM_COPYDATA, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -125,6 +131,8 @@ mod imp {
     const WM_TRAY: u32 = WM_APP + 1;
     /// Another Sivryn start asks to show the window.
     const WM_SHOW: u32 = WM_APP + 2;
+    /// `WM_COPYDATA` tag of a `sivryn://` link from another start.
+    const COPY_LINK: usize = 0x5356_4c4b;
     const MENU_OPEN: usize = 1;
     const MENU_UPDATES: usize = 2;
     const MENU_QUIT: usize = 3;
@@ -144,7 +152,7 @@ mod imp {
         }
     }
 
-    pub fn already_running() -> bool {
+    pub fn already_running(link: Option<&str>) -> bool {
         // SAFETY: a named mutex held for the life of the process; the shell
         // window of the running instance gets a posted message.
         unsafe {
@@ -155,6 +163,17 @@ mod imp {
                 return false;
             }
             if let Ok(window) = FindWindowW(CLASS, PCWSTR::null()) {
+                // The running one may bring its window to the front.
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                if let Some(link) = link {
+                    // Copied into the receiving process while this call waits.
+                    let data = COPYDATASTRUCT {
+                        dwData: COPY_LINK,
+                        cbData: link.len() as u32,
+                        lpData: link.as_ptr() as *mut _,
+                    };
+                    SendMessageW(window, WM_COPYDATA, Some(WPARAM(0)), Some(LPARAM(&data as *const _ as isize)));
+                }
                 let _ = PostMessageW(Some(window), WM_SHOW, WPARAM(0), LPARAM(0));
             }
             true
@@ -245,6 +264,19 @@ mod imp {
                 _ => {}
             },
             WM_SHOW => send(ShellEvent::Open),
+            WM_COPYDATA => {
+                // SAFETY: WM_COPYDATA's lParam points to a COPYDATASTRUCT valid during this call.
+                let data = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+                if data.dwData == COPY_LINK && !data.lpData.is_null() {
+                    // SAFETY: cbData bytes at lpData, as sent by `already_running`.
+                    let bytes = unsafe { std::slice::from_raw_parts(data.lpData as *const u8, data.cbData as usize) };
+                    if let Some(invite) = std::str::from_utf8(bytes).ok().and_then(crate::links::parse) {
+                        crate::links::set_pending(invite);
+                        send(ShellEvent::Invite);
+                    }
+                }
+                return LRESULT(1);
+            }
             WM_TIMER => {
                 let wanted = *BADGE.lock().unwrap_or_else(|e| e.into_inner());
                 match SHOWN.with(|s| s.get()) {

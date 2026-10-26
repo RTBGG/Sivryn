@@ -83,6 +83,7 @@ impl TestApp {
             oidc: None,
             files_dir: std::env::temp_dir().join(format!("sivryn-test-files-{schema}")),
             max_upload_bytes: 1024 * 1024,
+            download_repo: None,
         };
         let state = AppState {
             db: db.clone(),

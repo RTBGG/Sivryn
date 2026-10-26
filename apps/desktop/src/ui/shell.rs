@@ -3,6 +3,7 @@
 
 use dioxus_native::prelude::dioxus_core::spawn_forever;
 use dioxus_native::prelude::*;
+use sivryn_client_core::protocol::api::GuildWithChannels;
 use sivryn_client_core::protocol::model::{ChannelKind, UserStatus};
 use sivryn_client_core::protocol::{ChannelId, GuildId, UserId};
 
@@ -386,6 +387,7 @@ fn ModalView() -> Element {
         Some(Modal::SwitchVoice(channel)) => rsx! { call::SwitchVoiceDialog { channel } },
         Some(Modal::JoinVoice(channel)) => rsx! { call::JoinVoiceDialog { channel } },
         Some(Modal::NotifySettings(guild)) => rsx! { channels::NotifyDialog { guild } },
+        Some(Modal::ForeignInvite) => rsx! { super::invites::ForeignInviteDialog {} },
         Some(modal) => rsx! { GuildDialog { key: "{modal:?}", modal } },
         None => rsx! {},
     }
@@ -460,7 +462,7 @@ fn InviteDialog() -> Element {
         let (Some(s), Some(guild)) = (state.session.cloned(), *state.guild.peek()) else { return };
         spawn(async move {
             match s.api.create_invite(guild).await {
-                Ok(code) => invite.set(Some(code)),
+                Ok(code) => invite.set(Some(crate::links::invite_url(s.api.base_url(), &code))),
                 Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }
         });
@@ -501,6 +503,17 @@ fn InviteDialog() -> Element {
     }
 }
 
+/// Shows a server just created or joined, at its first text channel.
+pub fn open_joined_guild(mut state: AppState, g: GuildWithChannels) {
+    let id = g.guild.id;
+    state.home.set(false);
+    state.guild.set(Some(id));
+    state.channel.set(g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
+    state.update_settings(|s| s.last_guild = Some(id));
+    // Keep refreshing even when the dialog that started it is gone.
+    spawn_forever(async move { state.report(state.refresh().await) });
+}
+
 #[component]
 fn GuildDialog(modal: Modal) -> Element {
     let mut state = use_context::<AppState>();
@@ -528,19 +541,13 @@ fn GuildDialog(modal: Modal) -> Element {
                 Modal::CreateGuild => {
                     s.api.create_guild(&value, t("channels.default_text"), t("channels.default_voice")).await
                 }
-                _ => s.api.accept_invite(&value).await,
+                _ => s.api.accept_invite(crate::links::code_from(&value)).await,
             };
             super::widgets::set_if_alive(busy, false);
             match result {
                 Ok(g) => {
-                    let id = g.guild.id;
-                    state.home.set(false);
-                    state.guild.set(Some(id));
-                    state.channel.set(g.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id));
-                    state.update_settings(|s| s.last_guild = Some(id));
                     state.modal.set(None);
-                    // Keep refreshing even though this dialog is gone now.
-                    spawn_forever(async move { state.report(state.refresh().await) });
+                    open_joined_guild(state, g);
                 }
                 Err(e) => super::widgets::set_if_alive(error, Some(e.to_string())),
             }

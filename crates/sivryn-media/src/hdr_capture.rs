@@ -84,7 +84,7 @@ pub fn hdr_display(source: &ScreenSource) -> Option<HdrDisplay> {
 }
 
 /// The monitor a screen (libwebrtc: display device index) or window (HWND) is on.
-fn monitor_of(source: &ScreenSource) -> Option<HMONITOR> {
+pub(crate) fn monitor_of(source: &ScreenSource) -> Option<HMONITOR> {
     match source.kind {
         SourceKind::Window => {
             // SAFETY: MonitorFromWindow accepts any window handle.
@@ -267,7 +267,8 @@ impl HdrCapture {
                 item.Size()?,
             )?;
             let session = pool.CreateCaptureSession(&item)?;
-            let _ = session.SetIsCursorCaptureEnabled(true);
+            // The pointer is drawn by `cursor.rs`, the same on every path.
+            let _ = session.SetIsCursorCaptureEnabled(false);
             // Windows 11: no yellow frame around what is captured.
             let _ = session.SetIsBorderRequired(false);
             session.StartCapture()?;
@@ -447,6 +448,20 @@ mod tests {
         // Not all black: the desktop has something on it.
         assert!(data.chunks(4).any(|p| p[0] > 20 || p[1] > 20 || p[2] > 20));
         eprintln!("frame {w}x{h}");
+        // As it goes out: through I420 with the pointer drawn in.
+        let data = {
+            use livekit::webrtc::native::yuv_helper;
+            use livekit::webrtc::prelude::I420Buffer;
+            let mut i420 = I420Buffer::new(w, h);
+            let (sy, su, sv) = i420.strides();
+            let (y, u, v) = i420.data_mut();
+            yuv_helper::abgr_to_i420(&data, w * 4, y, sy, u, su, v, sv, w as i32, h as i32);
+            crate::cursor::CursorOverlay::new(screen).draw(&mut i420);
+            let mut out = vec![0u8; data.len()];
+            let (y, u, v) = i420.data();
+            yuv_helper::i420_to_abgr(y, sy, u, su, v, sv, &mut out, w * 4, w as i32, h as i32);
+            out
+        };
         // A BMP of the frame for looking at, if asked for.
         if let Some(path) = std::env::var_os("SIVRYN_TEST_CAPTURE_BMP") {
             let mut bmp = Vec::new();

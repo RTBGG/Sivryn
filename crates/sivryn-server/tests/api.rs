@@ -535,3 +535,38 @@ async fn gateway_rejects_bad_tokens_and_foreign_devices() {
 
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn invite_links_show_a_page_and_a_preview() {
+    let Some(app) = TestApp::spawn(RegistrationMode::Open).await else { return };
+    let alice = app.register("alice").await;
+    let guild = create_guild(&app, &alice, "Café <Crew>").await;
+    let invite: Value = app.post_ok(&format!("/guilds/{}/invites", guild.guild.id), &alice.token, json!(null)).await;
+    let code = invite["code"].as_str().unwrap().to_owned();
+
+    // The preview needs no sign-in.
+    let (status, preview) = app.request::<()>(reqwest::Method::GET, &format!("/invites/{code}"), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["guild"]["name"], "Café <Crew>");
+    assert_eq!(preview["guild"]["member_count"], 1);
+    let (status, _) = app.request::<()>(reqwest::Method::GET, "/invites/nope", None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let http = reqwest::Client::new();
+    for path in [format!("/{code}"), format!("/invite/{code}")] {
+        let resp = http.get(format!("{}{path}", app.url)).header("Accept-Language", "de-DE").send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = resp.text().await.unwrap();
+        assert!(html.contains("Café &lt;Crew&gt;"), "{html}");
+        assert!(html.contains(&format!("sivryn://join/{}/{code}", app.url.trim_start_matches("http://"))), "{html}");
+        assert!(html.contains("In Sivryn öffnen"));
+    }
+    let resp = http.get(format!("{}/doesnotexist", app.url)).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = http.get(format!("{}/", app.url)).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.text().await.unwrap().contains("Test"));
+    assert_eq!(http.get(format!("{}/healthz", app.url)).send().await.unwrap().text().await.unwrap(), "ok");
+
+    app.cleanup().await;
+}
