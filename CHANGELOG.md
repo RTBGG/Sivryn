@@ -3,6 +3,13 @@
 What changed in each release, newest first. The release workflow uses the section of a tag as
 the notes of its GitHub release and of its update.
 
+## v0.1.0-alpha.19
+
+### Fixed
+
+- The title bar keeps Sivryn's colors when the window was started hidden in the notification
+  area (e.g. with Windows) and opened later.
+
 ## v0.1.0-alpha.18
 
 ### Fixed

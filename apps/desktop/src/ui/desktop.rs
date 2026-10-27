@@ -76,13 +76,18 @@ fn badge(state: AppState) -> Badge {
 fn handle(mut state: AppState, event: ShellEvent) {
     tracing::debug!(?event, "shell event");
     match event {
-        ShellEvent::Open => blitz_shell::window_control::show_and_focus(),
+        ShellEvent::Open => {
+            blitz_shell::window_control::show_and_focus();
+            crate::window::restyle_title_bar();
+        }
         ShellEvent::Invite => {
             blitz_shell::window_control::show_and_focus();
+            crate::window::restyle_title_bar();
             super::invites::arrived(state);
         }
         ShellEvent::CheckForUpdates => {
             blitz_shell::window_control::show_and_focus();
+            crate::window::restyle_title_bar();
             state.settings_page.set(Some(super::SettingsPage::About));
             spawn_forever(super::updates::check(state));
         }

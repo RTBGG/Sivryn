@@ -5,9 +5,13 @@ pub fn icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(include_bytes!("../assets/icons/icon-64.rgba").to_vec(), 64, 64).ok()
 }
 
+/// The theme of the last [`style_title_bar`] (0 unset, 1 light, 2 dark).
+static TITLE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Colors the title bar to match the server rail (`--bg-0`) on Windows 11.
 /// The window may not exist yet right after launch, so this retries briefly.
 pub async fn style_title_bar(dark: bool) {
+    TITLE_THEME.store(if dark { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
     #[cfg(windows)]
     for _ in 0..50 {
         if imp::apply(dark) {
@@ -17,6 +21,18 @@ pub async fn style_title_bar(dark: bool) {
     }
     #[cfg(not(windows))]
     let _ = dark;
+}
+
+/// Colors the title bar again (after showing the window from the
+/// notification area: one that started hidden may have missed it).
+pub fn restyle_title_bar() {
+    #[cfg(windows)]
+    match TITLE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {}
+        theme => {
+            imp::apply(theme == 2);
+        }
+    }
 }
 
 /// Whether Sivryn's window has the keyboard focus right now.
@@ -37,6 +53,7 @@ pub fn flash() {
 /// also when it was hidden to the notification area.
 pub fn bring_to_front() {
     blitz_shell::window_control::show_and_focus();
+    restyle_title_bar();
     #[cfg(windows)]
     imp::bring_to_front();
 }
@@ -140,7 +157,13 @@ mod imp {
     }
 
     pub fn apply(dark: bool) -> bool {
-        let windows = own_windows();
+        // The app's window from Blitz, also while hidden (`own_windows` only
+        // finds visible ones, so a start in the notification area found none).
+        let mut windows: Vec<HWND> =
+            blitz_shell::window_control::native_handles().into_iter().map(|h| HWND(h as *mut _)).collect();
+        if windows.is_empty() {
+            windows = own_windows();
+        }
         let (caption, text) = if dark { (0x0e0f13, 0xebecf0) } else { (0xe4e6ec, 0x15161c) };
         for hwnd in &windows {
             let dark_mode = BOOL(dark as i32);
