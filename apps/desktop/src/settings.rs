@@ -231,7 +231,16 @@ pub fn config_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("Sivryn"))
+    Some(base.join(match profile() {
+        Some(name) => format!("Sivryn-{name}"),
+        None => "Sivryn".to_owned(),
+    }))
+}
+
+/// `SIVRYN_PROFILE` (development): a second client with its own settings and
+/// accounts next to the usual one, e.g. to test with two users at once.
+pub fn profile() -> Option<String> {
+    std::env::var("SIVRYN_PROFILE").ok().filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 fn path() -> Option<PathBuf> {

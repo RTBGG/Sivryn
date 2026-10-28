@@ -87,7 +87,7 @@ impl Session {
     }
 
     /// Reuses the stored device if the server still knows it, else registers a new one.
-    async fn with_device(api: ApiClient, user: User, store: Store) -> Result<Self, String> {
+    pub(crate) async fn with_device(api: ApiClient, user: User, store: Store) -> Result<Self, String> {
         let store = Rc::new(store);
         match store.device() {
             Ok(Some((device_id, state))) => match MlsDevice::import(&state) {

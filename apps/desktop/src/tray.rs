@@ -94,6 +94,10 @@ pub fn remove() {
 /// Whether Sivryn already runs; if so, it was asked to show its window and
 /// this process should end.
 pub fn already_running(link: Option<&str>) -> bool {
+    // A development profile runs next to the usual client.
+    if crate::settings::profile().is_some() {
+        return false;
+    }
     #[cfg(windows)]
     return imp::already_running(link);
     #[cfg(not(windows))]

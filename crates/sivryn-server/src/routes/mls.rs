@@ -14,7 +14,7 @@ use sivryn_protocol::api::{
 };
 use sivryn_protocol::gateway::{Audience, Event};
 use sivryn_protocol::permissions::Permissions;
-use sivryn_protocol::{ChannelId, DeviceId, UserId};
+use sivryn_protocol::{ChannelId, DeviceId, GuildId, UserId};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -39,6 +39,18 @@ pub async fn register_device(
         .await?;
     insert_key_packages(&mut tx, device_id, &req.key_packages).await?;
     tx.commit().await?;
+
+    // Guild mates add the new device to their channel groups. Someone who
+    // registered with a server invite joined before having a device, so the
+    // members couldn't add them on joining.
+    let guilds: Vec<(Uuid,)> = sqlx::query_as("SELECT guild_id FROM guild_members WHERE user_id = $1")
+        .bind(auth.id.0)
+        .fetch_all(&state.db)
+        .await?;
+    for (guild,) in guilds {
+        let guild_id = GuildId(guild);
+        state.events.publish(Audience::Guild(guild_id), Event::ChannelAccessChanged { guild_id });
+    }
     Ok((StatusCode::CREATED, Json(RegisterDeviceResponse { device_id })))
 }
 

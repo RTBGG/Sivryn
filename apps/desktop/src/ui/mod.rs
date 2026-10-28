@@ -751,6 +751,11 @@ impl AppState {
             self.groups_ready.write().insert(channel);
             let new = chat::catch_up(s, channel).await?;
             self.on_new_records(s, channel, new);
+            // People who joined (or got access) while this device was away
+            // wait for a member to add them.
+            if let Err(e) = chat::sync_members(s, channel).await {
+                tracing::warn!(error = %e, %channel, "could not update the channel's group");
+            }
         }
         Ok(())
     }

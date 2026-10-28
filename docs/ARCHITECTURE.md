@@ -113,6 +113,15 @@ If two devices create the same channel group at the same moment, the server acce
 first commit; the other device drops its provisional group (epoch 0, only itself) and joins from
 the winner's welcome, even when the welcome arrives before its own commit is rejected.
 
+A group whose creator is still alone in it has no commit on the server, so a device only
+creates a channel's group when the channel has neither commits nor messages; otherwise it waits
+to be added. A second group would leave the first one's messages and history keys behind.
+Members add newcomers when they join, when they register a device (the server sends
+`ChannelAccessChanged` to the guilds of whoever registered one: someone who signed up with a
+server invite joined before having a device), and at start for everyone who joined while they
+were away. A device that joins by welcome while holding history keys for the channel hands them
+to the group.
+
 **History for new members:** MLS deletes message keys after use, so a device added later can't
 read what was sent before. Guilds that share history (`share_history`, on by default) therefore
 also seal every message, edit and reaction with the channel's *history key* (XChaCha20-Poly1305,

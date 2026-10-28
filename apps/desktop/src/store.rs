@@ -134,6 +134,13 @@ impl Store {
         Self::with_connection(db, cipher, account.clone())
     }
 
+    /// A throwaway database (tests).
+    #[cfg(test)]
+    pub fn in_memory(account: AccountId) -> Self {
+        let cipher = XChaCha20Poly1305::new_from_slice(&[7u8; 32]).unwrap();
+        Self::with_connection(Connection::open_in_memory().unwrap(), cipher, account).unwrap()
+    }
+
     fn with_connection(db: Connection, cipher: XChaCha20Poly1305, account: AccountId) -> Result<Self, StoreError> {
         db.execute_batch(
             "PRAGMA journal_mode = WAL;

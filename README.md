@@ -112,6 +112,11 @@ the tests may create schemas in (in CI a missing `DATABASE_URL` fails the run):
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo test -p sivryn-server
 ```
 
+To try something with two users on one PC, start more clients with `SIVRYN_PROFILE=<name>`:
+each profile has its own settings and accounts (`%APPDATA%\Sivryn-<name>`) and runs next to
+the usual client. The desktop's chat tests (`apps/desktop/src/chat.rs`) run against a server
+given in `SIVRYN_TEST_INSTANCE` (registration open), e.g. `http://127.0.0.1:8080`.
+
 The first build of `sivryn-media` and `sivryn-desktop` downloads a prebuilt libwebrtc
 (about 200 MB). On Windows you need the MSVC build tools. `.cargo/config.toml` enables the
 static CRT that libwebrtc requires.

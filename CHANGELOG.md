@@ -3,6 +3,20 @@
 What changed in each release, newest first. The release workflow uses the section of a tag as
 the notes of its GitHub release and of its update.
 
+## v0.1.0-alpha.20
+
+### Fixed
+
+- New members of a server can read the messages written before they joined. Their client
+  opened the channel right away and, finding no sign of the existing encryption group (its
+  creator was still alone in it), started a second one, which had neither the earlier messages
+  nor their history keys. Clients now wait to be added to the existing group instead.
+- Someone who signs up with a server invite is added to the server's channels as soon as their
+  device exists; before, the members tried while there was no device yet. Members also add
+  everyone who joined while they were offline when they start Sivryn.
+- Needs the server update. Messages from servers where this already went wrong may stay
+  unreadable for those members.
+
 ## v0.1.0-alpha.19
 
 ### Fixed

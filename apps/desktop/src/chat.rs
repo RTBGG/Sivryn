@@ -48,6 +48,17 @@ pub async fn accept_welcomes(s: &Session) -> Result<Vec<ChannelId>, String> {
     if !joined.is_empty() {
         s.persist_mls();
     }
+    // Keys from before this welcome (e.g. a group of our own that another
+    // member's replaced) go to the group, so its members can read what they seal.
+    for &channel in &joined {
+        let keys = s.store.history_keys(channel).map_err(|e| e.to_string())?;
+        if s.history_channels.borrow().contains(&channel)
+            && !keys.is_empty()
+            && let Err(e) = share_keys(s, channel, keys).await
+        {
+            tracing::warn!(error = %e, %channel, "could not hand the history keys to the group");
+        }
+    }
     Ok(joined)
 }
 
@@ -62,8 +73,14 @@ pub async fn ensure_group(s: &Session, channel: ChannelId) -> Result<bool, Strin
         return Ok(true);
     }
 
-    // Someone already created the group but hasn't added us yet.
+    // Someone already created the group but hasn't added us yet. A group
+    // whose creator is still alone in it has no commits yet, but messages:
+    // a second group would leave them (and their history keys) behind.
     if !s.api.mls_commits_since(channel, 0).await.map_err(|e| e.to_string())?.is_empty() {
+        return Ok(false);
+    }
+    let latest = MessageQuery { limit: Some(1), ..Default::default() };
+    if !s.api.messages(channel, &latest).await.map_err(|e| e.to_string())?.is_empty() {
         return Ok(false);
     }
 
@@ -431,4 +448,135 @@ pub async fn catch_up(s: &Session, channel: ChannelId) -> Result<Vec<Record>, St
     }
     new.extend(backfill(s, channel).await?);
     Ok(new)
+}
+
+/// Against a running server: `SIVRYN_TEST_INSTANCE=http://127.0.0.1:18080`
+/// (registration open). Skipped without it.
+#[cfg(test)]
+mod tests {
+    use sivryn_client_core::ApiClient;
+    use sivryn_client_core::protocol::api::RegisterRequest;
+    use sivryn_client_core::protocol::model::ChannelKind;
+
+    use super::*;
+    use crate::store::{AccountId, Store};
+
+    async fn session(instance: &str, name: &str) -> Session {
+        let mut api = ApiClient::new(instance).unwrap();
+        let username = format!("{name}{}", &uuid_suffix());
+        let req = RegisterRequest { username, password: "history-test-password".into(), invite_code: None };
+        let user = api.register(&req).await.unwrap();
+        let store = Store::in_memory(AccountId { instance: instance.into(), user_id: user.id });
+        Session::with_device(api, user, store).await.unwrap()
+    }
+
+    fn uuid_suffix() -> String {
+        MessageId::new().to_string().replace('-', "")[20..].to_owned()
+    }
+
+    fn bodies(records: &[Record]) -> Vec<Option<String>> {
+        records
+            .iter()
+            .filter(|r| r.kind == MessageKind::Message)
+            .map(|r| r.content.as_ref().map(|c| c.body.clone()))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_members_read_earlier_messages() {
+        let Ok(instance) = std::env::var("SIVRYN_TEST_INSTANCE") else { return };
+        let alice = session(&instance, "alice").await;
+        let bob = session(&instance, "bob").await;
+
+        let g = alice.api.create_guild("History", "Text", "Voice").await.unwrap();
+        assert!(g.guild.share_history);
+        let channel = g.channels.iter().find(|c| c.kind == ChannelKind::Text).unwrap().id;
+        alice.history_channels.borrow_mut().insert(channel);
+        bob.history_channels.borrow_mut().insert(channel);
+
+        assert!(ensure_group(&alice, channel).await.unwrap());
+        for body in ["before 1", "before 2"] {
+            let content = MessageContent { body: body.into(), ..Default::default() };
+            send(&alice, channel, content, MessageKind::Message, None).await.unwrap();
+        }
+
+        let code = alice.api.create_invite(g.guild.id).await.unwrap();
+        bob.api.accept_invite(&code).await.unwrap();
+        // What alice's client does on MemberJoin.
+        sync_members(&alice, channel).await.unwrap();
+
+        let joined = accept_welcomes(&bob).await.unwrap();
+        assert_eq!(joined, vec![channel]);
+        let records = catch_up(&bob, channel).await.unwrap();
+        eprintln!("bob sees: {:?}", bodies(&records));
+        let stored = history(&bob, channel);
+        assert_eq!(
+            bodies(&stored),
+            vec![Some("before 1".to_owned()), Some("before 2".to_owned())],
+            "stored for bob: {stored:?}"
+        );
+    }
+
+    /// Bob catches up between alice's commit and her key message, then gets
+    /// the keys live (gateway), as in the app.
+    #[tokio::test(flavor = "current_thread")]
+    async fn keys_arriving_after_catch_up_unlock_earlier_messages() {
+        let Ok(instance) = std::env::var("SIVRYN_TEST_INSTANCE") else { return };
+        let alice = session(&instance, "alice").await;
+        let bob = session(&instance, "bob").await;
+
+        let g = alice.api.create_guild("History", "Text", "Voice").await.unwrap();
+        let channel = g.channels.iter().find(|c| c.kind == ChannelKind::Text).unwrap().id;
+        alice.history_channels.borrow_mut().insert(channel);
+        bob.history_channels.borrow_mut().insert(channel);
+        assert!(ensure_group(&alice, channel).await.unwrap());
+        let content = MessageContent { body: "before".into(), ..Default::default() };
+        send(&alice, channel, content, MessageKind::Message, None).await.unwrap();
+
+        let code = alice.api.create_invite(g.guild.id).await.unwrap();
+        bob.api.accept_invite(&code).await.unwrap();
+        // add_user's commit, without the key message yet.
+        let claimed = alice.api.claim_key_packages(bob.user.id).await.unwrap();
+        let kps: Vec<String> = claimed.iter().map(|c| c.key_package.clone()).collect();
+        let pending = alice.mls.borrow_mut().add_members(channel, &kps).unwrap();
+        submit(&alice, channel, pending, claimed.iter().map(|c| c.device_id).collect()).await.unwrap();
+
+        assert_eq!(accept_welcomes(&bob).await.unwrap(), vec![channel]);
+        catch_up(&bob, channel).await.unwrap();
+        assert_eq!(bodies(&history(&bob, channel)), vec![None]);
+
+        share_keys(&alice, channel, alice.store.history_keys(channel).unwrap()).await.unwrap();
+        // The gateway's MessageCreate for the key message.
+        let latest = bob.api.messages(channel, &MessageQuery { limit: Some(1), ..Default::default() }).await.unwrap();
+        receive(&bob, channel, &latest);
+        let unlocked = backfill(&bob, channel).await.unwrap();
+        eprintln!("unlocked: {:?}", bodies(&unlocked));
+        assert_eq!(bodies(&history(&bob, channel)), vec![Some("before".to_owned())]);
+    }
+
+    /// Bob opens the channel before alice added him: no group of his own
+    /// (it would leave her messages and keys behind); he waits for hers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn joiners_wait_for_the_existing_group() {
+        let Ok(instance) = std::env::var("SIVRYN_TEST_INSTANCE") else { return };
+        let alice = session(&instance, "alice").await;
+        let bob = session(&instance, "bob").await;
+
+        let g = alice.api.create_guild("History", "Text", "Voice").await.unwrap();
+        let channel = g.channels.iter().find(|c| c.kind == ChannelKind::Text).unwrap().id;
+        alice.history_channels.borrow_mut().insert(channel);
+        bob.history_channels.borrow_mut().insert(channel);
+        assert!(ensure_group(&alice, channel).await.unwrap());
+        let content = MessageContent { body: "before".into(), ..Default::default() };
+        send(&alice, channel, content, MessageKind::Message, None).await.unwrap();
+
+        let code = alice.api.create_invite(g.guild.id).await.unwrap();
+        bob.api.accept_invite(&code).await.unwrap();
+        assert!(!ensure_group(&bob, channel).await.unwrap(), "bob started a group of his own");
+
+        sync_members(&alice, channel).await.unwrap();
+        assert!(ensure_group(&bob, channel).await.unwrap());
+        catch_up(&bob, channel).await.unwrap();
+        assert_eq!(bodies(&history(&bob, channel)), vec![Some("before".to_owned())]);
+    }
 }
