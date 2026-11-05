@@ -3,22 +3,20 @@
 **Self-hosted voice, video and screen sharing for your friends, without compromising on quality.**
 
 Sivryn is an open-source, Discord-style chat platform written in Rust. You run it on your own
-server under your own domain with a single `docker compose up`. It is built around one goal:
-screen sharing that looks sharp. That means up to 1440p60 at 12 Mbit/s by default, AV1 when
-your GPU can encode it, and limits that you as the admin control.
+server under your own domain with a single `docker compose up`.
 
 > **Status: early development.** The server, the protocol and the media engine compile, and
 > the core paths have tests. Nothing has been battle-tested yet. See the [roadmap](#roadmap).
 
 ## Features
 
-- **Screen sharing first.** Native capture (Windows Graphics Capture today; ScreenCaptureKit
-  and PipeWire via the same code path later), hardware encoding, and AV1 with H.264 fallback.
-  Temporal SVC keeps text sharp for viewers on weak connections.
 - **Voice and video** over a LiveKit SFU. Sivryn's own audio engine brings AI noise
   suppression (DeepFilterNet3 or RNNoise), echo cancellation, voice activity or push-to-talk
   with global hotkeys, per-user volume and screen share audio that never echoes your friends'
   voices back. Cameras are published with simulcast.
+- **Crisp Screen sharing** Native capture (Windows Graphics Capture today; ScreenCaptureKit
+  and PipeWire via the same code path later), hardware encoding, and AV1 with H.264 fallback.
+  Temporal SVC keeps text sharp for viewers on weak connections.
 - **End-to-end encryption.** Text channels use MLS (RFC 9420). Voice and video can be
   E2EE per channel, with keys derived from the same MLS group and rotated on every join or leave.
   Servers can let new members read earlier messages through history keys that only travel
