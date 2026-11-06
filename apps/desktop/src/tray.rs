@@ -121,9 +121,10 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
         DestroyMenu, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON, MF_SEPARATOR,
-        MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendMessageW,
-        SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-        WINDOW_EX_STYLE, WM_APP, WM_COPYDATA, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_POPUP,
+        MF_STRING, MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SMTO_ABORTIFHUNG,
+        SendMessageTimeoutW, SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+        TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_COPYDATA, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER,
+        WNDCLASSW, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -166,20 +167,37 @@ mod imp {
                 std::mem::forget(_mutex);
                 return false;
             }
-            if let Ok(window) = FindWindowW(CLASS, PCWSTR::null()) {
-                // The running one may bring its window to the front.
-                let _ = AllowSetForegroundWindow(ASFW_ANY);
-                if let Some(link) = link {
-                    // Copied into the receiving process while this call waits.
-                    let data = COPYDATASTRUCT {
-                        dwData: COPY_LINK,
-                        cbData: link.len() as u32,
-                        lpData: link.as_ptr() as *mut _,
-                    };
-                    SendMessageW(window, WM_COPYDATA, Some(WPARAM(0)), Some(LPARAM(&data as *const _ as isize)));
+            // Its notification area window comes up a moment after it starts.
+            let mut window = None;
+            for _ in 0..50 {
+                window = FindWindowW(CLASS, PCWSTR::null()).ok();
+                if window.is_some() {
+                    break;
                 }
-                let _ = PostMessageW(Some(window), WM_SHOW, WPARAM(0), LPARAM(0));
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
+            let answers = |window: HWND, msg: u32, lparam: LPARAM| {
+                SendMessageTimeoutW(window, msg, WPARAM(0), lparam, SMTO_ABORTIFHUNG, 3000, None).0 != 0
+            };
+            let Some(window) = window.filter(|w| answers(*w, WM_NULL, LPARAM(0))) else {
+                // Stuck before it got that far, or hung: starting another
+                // one would only hand over to it again.
+                tracing::warn!("the running Sivryn doesn't respond");
+                crate::diagnostics::message_box(
+                    crate::i18n::t("startup.failed_title"),
+                    crate::i18n::t("startup.not_responding"),
+                );
+                return true;
+            };
+            // The running one may bring its window to the front.
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+            if let Some(link) = link {
+                // Copied into the receiving process while this call waits.
+                let data =
+                    COPYDATASTRUCT { dwData: COPY_LINK, cbData: link.len() as u32, lpData: link.as_ptr() as *mut _ };
+                answers(window, WM_COPYDATA, LPARAM(&data as *const _ as isize));
+            }
+            let _ = PostMessageW(Some(window), WM_SHOW, WPARAM(0), LPARAM(0));
             true
         }
     }

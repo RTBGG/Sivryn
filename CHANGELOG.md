@@ -3,6 +3,18 @@
 What changed in each release, newest first. The release workflow uses the section of a tag as
 the notes of its GitHub release and of its update.
 
+## v0.1.0-alpha.21
+
+### Start problems
+
+- When Sivryn can't start, it says so in a message instead of disappearing after a moment of
+  busy cursor, with the reason and where the log is.
+- Sivryn writes a log of each run to `%LOCALAPPDATA%\Sivryn\sivryn.log` (the run before in
+  `sivryn.old.log`), and `crash.log` there now also records crashes outside Sivryn's own code
+  (e.g. in a graphics driver), with the module they happened in.
+- Starting Sivryn while a running one hangs shows a hint to end it in Task Manager, instead of
+  doing nothing.
+
 ## v0.1.0-alpha.20
 
 ### Fixed

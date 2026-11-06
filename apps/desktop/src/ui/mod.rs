@@ -1429,6 +1429,7 @@ pub fn App() -> Element {
 
     use_hook(move || updates::start(state));
     use_hook(move || desktop::start(state));
+    use_hook(crate::diagnostics::window_shown);
     use_hook(move || invites::arrived(state));
 
     // Apply settings whenever they change.
