@@ -92,6 +92,8 @@ pub enum Event {
     },
     /// Friends, requests or blocks changed; refetch `GET /friends`.
     RelationshipsChanged,
+    /// The user put their servers in a new order (on another device, or this one).
+    GuildOrderChanged,
     /// `status: None` means offline (or invisible).
     PresenceUpdate {
         user_id: UserId,

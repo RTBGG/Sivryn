@@ -656,7 +656,8 @@ h1, h2, h3 { margin: 0; }
 .minimap {
   position: absolute;
   right: 12px;
-  bottom: 12px;
+  /* Above the volume and fullscreen buttons. */
+  bottom: 54px;
   overflow: hidden;
   border: 1px solid #ffffff59;
   border-radius: 6px;
@@ -1896,6 +1897,11 @@ h1, h2, h3 { margin: 0; }
   text-transform: uppercase;
 }
 .drag-ghost.voice-member { height: auto; font-size: 0.86rem; }
+.drag-ghost.guild { width: auto; height: auto; padding: 0; background: transparent; box-shadow: none; opacity: 0.85; }
+/* Where a dragged server would land in the server list. */
+.rail-drop-line { position: absolute; left: 12px; right: 12px; height: 3px; border-radius: 2px; background: var(--accent); }
+.rail-drop-line.before { top: -6px; }
+.rail-drop-line.after { top: 100%; margin-top: 3px; }
 
 .guild-picker { position: relative; margin-bottom: 10px; width: 100%; }
 .guild-picker .select-button { gap: 10px; }
@@ -2095,10 +2101,27 @@ h1, h2, h3 { margin: 0; }
 .mention-label { font-weight: 600; }
 
 /* --- Fullscreen: video and call streams ------------------------------------------------ */
+/* Bottom right of a tile, across from the name: stream volume and fullscreen. */
+.tile-controls { position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.tile-controls .volume-hover > .icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #000000a6;
+  color: #ffffff;
+}
+.tile-controls .volume-hover > .icon-button:hover { background: #000000d9; }
+.tile-controls .volume-pop { left: -2px; top: -116px; }
+/* In the fullscreen bar: speaker, slider and percentage in a row. */
+.stream-volume.inline { display: flex; align-items: center; gap: 8px; color: #ffffff; }
+.stream-volume.inline .icon-button { color: #ffffff; }
+.stream-volume-slider { display: flex; width: 140px; }
+.stream-volume-slider .slider { flex-grow: 1; }
+.stream-volume-value { width: 44px; color: #c9cbd3; font-size: 0.8rem; text-align: right; }
 .tile-fullscreen {
-  position: absolute;
-  top: 10px;
-  right: 10px;
   display: flex;
   align-items: center;
   justify-content: center;

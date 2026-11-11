@@ -1,5 +1,6 @@
 //! Dragging in the channel list: channels and categories to reorder them,
-//! people in voice channels to move them to another voice channel.
+//! people in voice channels to move them to another voice channel. In the
+//! server list, servers to reorder them.
 //!
 //! Blitz has no HTML drag and drop and reports only window coordinates, so
 //! dragging is done by hand: a left press starts a pending drag, moving a few
@@ -28,6 +29,8 @@ pub enum DragItem {
         user: UserId,
         from: ChannelId,
     },
+    /// A server in the server list.
+    Guild(GuildId),
 }
 
 /// Where it would land.
@@ -41,6 +44,8 @@ pub enum DropTarget {
     AfterCategory(CategoryId),
     /// Into a voice channel (people).
     Voice(ChannelId),
+    BeforeGuild(GuildId),
+    AfterGuild(GuildId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +118,7 @@ pub fn set_target(mut state: AppState, target: DropTarget) {
             (DragItem::Channel(_), DropTarget::IntoCategory(_)) => true,
             (DragItem::Category(c), DropTarget::BeforeCategory(t) | DropTarget::AfterCategory(t)) => c != t,
             (DragItem::Member { from, .. }, DropTarget::Voice(t)) => from != t,
+            (DragItem::Guild(g), DropTarget::BeforeGuild(t) | DropTarget::AfterGuild(t)) => g != t,
             _ => false,
         },
         _ => false,
@@ -159,8 +165,31 @@ fn drop_on(state: AppState, drag: &Drag, target: DropTarget) {
                 state.report(s.api.move_voice_member(guild, user, channel).await.map_err(|e| e.to_string()));
             });
         }
+        (DragItem::Guild(guild), DropTarget::BeforeGuild(t) | DropTarget::AfterGuild(t)) => {
+            reorder_guilds(state, guild, t, matches!(target, DropTarget::AfterGuild(_)))
+        }
         (item, target) => reorder(state, drag.guild, item, target),
     }
+}
+
+/// Moves a server before or after another one in the server list and saves
+/// the order (on the server, so every device of the user shows it).
+fn reorder_guilds(mut state: AppState, guild: GuildId, target: GuildId, after: bool) {
+    let order = {
+        let mut guilds = state.guilds.write();
+        let Some(from) = guilds.iter().position(|g| g.guild.id == guild) else { return };
+        let moved = guilds.remove(from);
+        let Some(i) = guilds.iter().position(|g| g.guild.id == target) else {
+            guilds.insert(from, moved);
+            return;
+        };
+        guilds.insert(if after { i + 1 } else { i }, moved);
+        guilds.iter().map(|g| g.guild.id).collect::<Vec<_>>()
+    };
+    let Some(s) = state.session.cloned() else { return };
+    spawn_forever(async move {
+        state.report(s.api.set_guild_order(order).await.map_err(|e| e.to_string()));
+    });
 }
 
 /// Moves a channel or category and saves the new channel list.
@@ -216,7 +245,7 @@ fn reorder(mut state: AppState, guild: GuildId, item: DragItem, target: DropTarg
             order.insert(if after { i + 1 } else { i }, id);
             lists.sort_by_key(|(c, _)| c.map_or(-1, |c| order.iter().position(|o| *o == c).unwrap_or(0) as i64));
         }
-        DragItem::Member { .. } => return,
+        DragItem::Member { .. } | DragItem::Guild(_) => return,
     }
 
     let placements: Vec<ChannelPlacement> = lists
@@ -285,6 +314,16 @@ pub fn DragGhost() -> Element {
                 div { class: "drag-ghost voice-member", style: "{style}",
                     Avatar { name: name.clone(), id: Some(user), size: 22 }
                     span { class: "voice-member-name", "{name}" }
+                }
+            }
+        }
+        DragItem::Guild(id) => {
+            let Some(g) = state.guilds.read().iter().find(|g| g.guild.id == id).map(|g| g.guild.clone()) else {
+                return rsx! {};
+            };
+            rsx! {
+                div { class: "drag-ghost guild", style: "{style}",
+                    super::guild_settings::GuildIcon { name: g.name.clone(), icon: g.icon_id, size: 40 }
                 }
             }
         }

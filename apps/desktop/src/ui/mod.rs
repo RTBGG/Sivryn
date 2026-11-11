@@ -1000,6 +1000,7 @@ impl AppState {
                     call::ring(self);
                 }
             }
+            Event::GuildOrderChanged => self.report(self.refresh().await),
             Event::RelationshipsChanged => {
                 self.report(self.refresh_friends().await);
                 // New friends share presence from now on.

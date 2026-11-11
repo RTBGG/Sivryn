@@ -45,6 +45,7 @@ pub fn api(max_upload_bytes: u64) -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(4 * 1024 * 1024 + UPLOAD_OVERHEAD)),
         )
         .route("/users/@me/read-states", get(users::read_states))
+        .route("/users/@me/guild-order", put(users::guild_order))
         .route("/users/@me/mutes", get(users::mutes))
         .route("/users/{user_id}", get(users::profile))
         .route("/presence", get(users::presence))

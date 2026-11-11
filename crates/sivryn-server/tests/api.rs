@@ -570,3 +570,30 @@ async fn invite_links_show_a_page_and_a_preview() {
 
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn servers_keep_the_order_their_member_gave_them() {
+    let Some(app) = TestApp::spawn(RegistrationMode::Open).await else { return };
+    let alice = app.register("alice").await;
+    let bob = app.register("bob").await;
+    let a = create_guild(&app, &alice, "a").await.guild.id;
+    let b = create_guild(&app, &alice, "b").await.guild.id;
+    let c = create_guild(&app, &alice, "c").await.guild.id;
+    let theirs = create_guild(&app, &bob, "bob's").await.guild.id;
+    let names = |guilds: Vec<GuildWithChannels>| guilds.into_iter().map(|g| g.guild.id).collect::<Vec<_>>();
+
+    // By join time until dragged.
+    assert_eq!(names(app.get_ok("/guilds", &alice.token).await), vec![a, b, c]);
+    // Someone else's server in the list is ignored.
+    let (status, _) = app.put("/users/@me/guild-order", &alice.token, json!({ "guilds": [c, theirs, a] })).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Placed ones first, the rest after them.
+    assert_eq!(names(app.get_ok("/guilds", &alice.token).await), vec![c, a, b]);
+    // A server joined later goes to the end.
+    let d = create_guild(&app, &alice, "d").await.guild.id;
+    assert_eq!(names(app.get_ok("/guilds", &alice.token).await), vec![c, a, b, d]);
+    // Bob's list is his own.
+    assert_eq!(names(app.get_ok("/guilds", &bob.token).await), vec![theirs]);
+
+    app.cleanup().await;
+}

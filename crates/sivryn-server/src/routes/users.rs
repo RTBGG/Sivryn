@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use chrono::{DateTime, Utc};
 use sivryn_protocol::api::{
-    AckRequest, ChannelMute, MeSettings, MuteRequest, ReadState, Relationship, UpdateMeRequest, UploadedFile,
-    UserPresence, UserProfile,
+    AckRequest, ChannelMute, GuildOrderRequest, MeSettings, MuteRequest, ReadState, Relationship, UpdateMeRequest,
+    UploadedFile, UserPresence, UserProfile,
 };
 use sivryn_protocol::gateway::{Audience, Event};
 use sivryn_protocol::model::UserStatus;
@@ -446,5 +446,29 @@ pub async fn unmute(
         .execute(&state.db)
         .await?;
     state.events.publish(Audience::Users(vec![auth.id]), Event::NotificationSettingsChanged);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts the user's servers in the order they dragged them into.
+pub async fn guild_order(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<GuildOrderRequest>,
+) -> ApiResult<StatusCode> {
+    if req.guilds.len() > 1000 {
+        return Err(ApiError::BadRequest("too many servers".into()));
+    }
+    let ids: Vec<Uuid> = req.guilds.iter().map(|g| g.0).collect();
+    // Only the user's own memberships; unknown servers are skipped.
+    sqlx::query(
+        "UPDATE guild_members m SET position = o.position - 1
+         FROM unnest($2::UUID[]) WITH ORDINALITY AS o(guild_id, position)
+         WHERE m.user_id = $1 AND m.guild_id = o.guild_id",
+    )
+    .bind(auth.id.0)
+    .bind(&ids)
+    .execute(&state.db)
+    .await?;
+    state.events.publish(Audience::Users(vec![auth.id]), Event::GuildOrderChanged);
     Ok(StatusCode::NO_CONTENT)
 }

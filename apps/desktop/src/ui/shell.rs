@@ -142,6 +142,8 @@ fn GuildRail() -> Element {
         })
         .collect();
     let home_count = state.home_unread();
+    let dragging_guild = matches!(super::dnd::active(&state), Some(super::dnd::DragItem::Guild(_)));
+    let target = super::dnd::target(&state);
 
     rsx! {
         nav { class: "rail",
@@ -171,15 +173,25 @@ fn GuildRail() -> Element {
                     let unread = state.guild_unread(id);
                     rsx! {
                         div { key: "{id}", class: "rail-entry",
+                            if target == Some(super::dnd::DropTarget::BeforeGuild(id)) {
+                                div { class: "rail-drop-line before" }
+                            }
                             div { class: if active { "rail-pill active" } else if unread > 0 { "rail-pill unread" } else { "rail-pill" } }
                             div { class: "rail-icon-wrap",
                                 div {
                                     class: if active { "rail-item active" } else { "rail-item" },
                                     title: "{g.guild.name}",
-                                    onclick: move |_| select_guild(state, id),
+                                    onclick: move |_| {
+                                        // The release of a drag isn't a click.
+                                        if !super::dnd::just_dragged() {
+                                            select_guild(state, id);
+                                        }
+                                    },
                                     onmousedown: move |e| {
                                         if let Some((x, y)) = menu::right_click(&e) {
                                             menu::open(state, x, y, menu::guild_items(state, id));
+                                        } else {
+                                            super::dnd::begin(state, id, super::dnd::DragItem::Guild(id), &e);
                                         }
                                     },
                                     GuildIcon { name: g.guild.name.clone(), icon: g.guild.icon_id, size: 48 }
@@ -187,6 +199,17 @@ fn GuildRail() -> Element {
                                 if unread > 0 {
                                     span { class: "rail-badge", "{count_label(unread)}" }
                                 }
+                            }
+                            // While a server is dragged: its top half drops before
+                            // this one, the bottom half after it.
+                            if dragging_guild {
+                                div { class: "drop-zones",
+                                    div { class: "drop-zone", onmousemove: move |_| super::dnd::set_target(state, super::dnd::DropTarget::BeforeGuild(id)) }
+                                    div { class: "drop-zone", onmousemove: move |_| super::dnd::set_target(state, super::dnd::DropTarget::AfterGuild(id)) }
+                                }
+                            }
+                            if target == Some(super::dnd::DropTarget::AfterGuild(id)) {
+                                div { class: "rail-drop-line after" }
                             }
                         }
                     }

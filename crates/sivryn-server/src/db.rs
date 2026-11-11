@@ -190,7 +190,7 @@ pub async fn channel(pool: &PgPool, id: ChannelId) -> ApiResult<ChannelRow> {
 pub async fn user_guilds(pool: &PgPool, user: UserId) -> ApiResult<Vec<Guild>> {
     let rows: Vec<GuildRow> = sqlx::query_as(
         "SELECT g.* FROM guilds g JOIN guild_members m ON m.guild_id = g.id
-         WHERE m.user_id = $1 ORDER BY m.joined_at",
+         WHERE m.user_id = $1 ORDER BY m.position NULLS LAST, m.joined_at",
     )
     .bind(user.0)
     .fetch_all(pool)

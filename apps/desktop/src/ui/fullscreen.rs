@@ -125,6 +125,9 @@ fn FeedFull(sid: String) -> Element {
     let Some(feed) = feed else { return rsx! {} };
     let guild = state.call.read().as_ref().and_then(|c| state.guild_of(c.channel));
     let name = feed.participant.parse().map(|id| state.display_name_in(guild, id)).unwrap_or(feed.participant.clone());
+    // Someone else's screen may come with sound; cameras have none.
+    let has_sound = feed.source == sivryn_media::TrackSource::Screenshare
+        && state.me().map(|id| id.to_string()).as_deref() != Some(feed.participant.as_str());
 
     rsx! {
         div { class: if active { "fullscreen" } else { "fullscreen idle" }, onmousemove: move |_| kick(),
@@ -134,6 +137,9 @@ fn FeedFull(sid: String) -> Element {
                     Svg { icon: Icon::Monitor, size: 16 }
                     span { class: "fullscreen-name", "{name}" }
                     span { class: "topbar-spacer" }
+                    if has_sound {
+                        super::call::StreamVolume { identity: feed.participant.clone(), inline: true }
+                    }
                     IconButton { icon: Icon::Minimize, size: 18, title: t("media.exit_fullscreen"), onclick: move |_| close(state) }
                 }
             }

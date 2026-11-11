@@ -3,6 +3,22 @@
 What changed in each release, newest first. The release workflow uses the section of a tag as
 the notes of its GitHub release and of its update.
 
+## v0.1.0-alpha.22
+
+### Calls
+
+- Streams have their own volume: hovering a screen share shows a speaker at the bottom right,
+  which mutes it on click and shows a slider (0–200 %) above it on hover. In fullscreen the
+  slider sits in the bar at the bottom. The volume is remembered per person, the same one the
+  right-click menu sets.
+- The fullscreen button of streams and cameras moved from the top right to the bottom right.
+
+### Server list
+
+- Servers can be put in any order by dragging them in the server list. The order is saved on
+  the server, so every device shows it; servers joined later go to the end.
+- Needs the server update (database migration).
+
 ## v0.1.0-alpha.21
 
 ### Start problems

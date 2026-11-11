@@ -171,6 +171,11 @@ impl ApiClient {
         self.get("/guilds").await
     }
 
+    /// Saves the order of the user's servers.
+    pub async fn set_guild_order(&self, guilds: Vec<GuildId>) -> Result<(), ClientError> {
+        self.put("/users/@me/guild-order", &GuildOrderRequest { guilds }).await
+    }
+
     /// Creates a guild; the category names are in the creator's language.
     pub async fn create_guild(
         &self,

@@ -644,7 +644,7 @@ fn ParticipantTile(
                 }
             }
             if let (true, Some(sid)) = (hovered, camera_sid) {
-                FullscreenButton { sid }
+                div { class: "tile-controls", FullscreenButton { sid } }
             }
             // A ring over the picture; a background or inset shadow was
             // hidden behind the video or showed as a green fill.
@@ -680,7 +680,78 @@ fn use_video_aspect(camera: Option<VideoFeed>) -> Option<f32> {
     *aspect.read()
 }
 
-/// Shows a tile's video over the whole screen (on hover, top right).
+/// The volume of someone's stream sound (their screen's audio), 0–200 %.
+/// The speaker mutes it; hovering it shows a slider above it, or `inline`
+/// next to it (the fullscreen bar has the room).
+#[component]
+pub(super) fn StreamVolume(identity: String, #[props(default)] inline: bool) -> Element {
+    let state = use_context::<AppState>();
+    // A drag keeps the pop-up open when the pointer leaves it.
+    let mut dragging = use_signal(|| false);
+    let key = screen_volume_key(&identity);
+    let (value, muted) = {
+        let s = state.settings.read();
+        (s.volumes.get(&key).copied().unwrap_or(1.0), s.muted_users.contains(&key))
+    };
+    let shown = if muted { 0.0 } else { value };
+    let toggle = {
+        let key = key.clone();
+        move |e: MouseEvent| {
+            e.stop_propagation();
+            let key = key.clone();
+            state.update_settings(|s| {
+                if !s.muted_users.remove(&key) {
+                    s.muted_users.insert(key);
+                }
+            });
+        }
+    };
+    // Moving the slider also unmutes.
+    let set = move |v: f32| {
+        dragging.set(true);
+        let key = key.clone();
+        state.update_settings(|s| {
+            s.muted_users.remove(&key);
+            s.volumes.insert(key, v);
+        });
+    };
+    let slider = rsx! {
+        super::widgets::Slider {
+            value: shown,
+            min: 0.0,
+            max: 2.0,
+            steps: 40,
+            vertical: !inline,
+            onchange: set,
+            onrelease: move |_| dragging.set(false),
+        }
+    };
+    let speaker = rsx! {
+        div { class: "icon-button", title: t("call.stream_volume"), onclick: toggle,
+            if shown <= 0.0 { Svg { icon: Icon::VolumeX, size: 16 } } else { Svg { icon: Icon::Volume, size: 16 } }
+        }
+    };
+    let percent = (shown * 100.0).round();
+    if inline {
+        return rsx! {
+            div { class: "stream-volume inline", onclick: move |e| e.stop_propagation(),
+                {speaker}
+                div { class: "stream-volume-slider", {slider} }
+                span { class: "stream-volume-value", "{percent} %" }
+            }
+        };
+    }
+    rsx! {
+        div {
+            class: if *dragging.read() { "volume-hover open" } else { "volume-hover" },
+            onclick: move |e| e.stop_propagation(),
+            div { class: "volume-pop", {slider} }
+            {speaker}
+        }
+    }
+}
+
+/// Shows a tile's video over the whole screen (on hover, bottom right).
 #[component]
 fn FullscreenButton(sid: String) -> Element {
     let state = use_context::<AppState>();
@@ -798,6 +869,8 @@ fn VideoTile(feed: VideoFeed, large: bool) -> Element {
     let name = feed.participant.parse().map(|id| state.display_name_in(guild, id)).unwrap_or(feed.participant.clone());
     let sid = feed.track_sid.clone();
     let full_sid = feed.track_sid.clone();
+    let feed_owner = feed.participant.clone();
+    let own_identity = state.me().map(|id| id.to_string());
     let (hovered, mark) = super::widgets::use_hover();
 
     // Zoom (wheel over the large tile) and the shown part, shared with the
@@ -850,7 +923,13 @@ fn VideoTile(feed: VideoFeed, large: bool) -> Element {
                 span { "{name}" }
             }
             if hovered {
-                FullscreenButton { sid: full_sid }
+                div { class: "tile-controls",
+                    // The sound of someone else's stream (one's own isn't played).
+                    if Some(feed_owner.as_str()) != own_identity.as_deref() {
+                        StreamVolume { identity: feed_owner.clone() }
+                    }
+                    FullscreenButton { sid: full_sid }
+                }
             }
             // While zoomed: the whole picture with a frame for the shown part,
             // which can be dragged around.

@@ -470,6 +470,13 @@ pub struct RoleRequest {
 }
 
 /// `PUT /api/v1/guilds/{id}/roles/order`: roles from highest to lowest,
+/// `PUT /api/v1/users/@me/guild-order`: the servers in the order the user
+/// dragged them into (servers left out keep their place after these).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuildOrderRequest {
+    pub guilds: Vec<GuildId>,
+}
+
 /// without `@everyone`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoleOrderRequest {
